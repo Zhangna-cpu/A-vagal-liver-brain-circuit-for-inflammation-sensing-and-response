@@ -1,0 +1,402 @@
+---
+title: "Calcium_imaging_data_analysis"
+author: "Chudi Zeng"
+date: "2025-08-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Time-series calculation of calcium fluorescence signals
+Process raw data exported from ImageJ
+```{r}
+## ========= Environment Setup =========
+## Path settings: plate folder path
+# root_dir <- "G:/NTU_INTERN/Zhang Na/20250731 In vitro Calcium imaging with inhibitors Ptger3 KO mice/Plate 1"
+
+## Exact filename match; to match a different name, just edit this line
+# TARGET_CSV_NAME <- "Results_chudi.csv"
+
+## ========= Dependencies (auto-install missing) =========
+need_pkgs <- c("writexl","stringr")
+to_install <- setdiff(need_pkgs, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+library(writexl)
+library(stringr)
+
+## ========= Utility functions =========
+digits_or_na <- function(x) {
+  m <- str_extract(x, "\\d+"); ifelse(is.na(m), "NA", m)
+}
+
+## Core processing function: perform steps 1–7 on Result.csv
+process_one_file <- function(csv_path, plate_num, well_num) {
+  message("Processing: ", csv_path)
+
+  # Step 1: read and drop the first row
+  ## — Read in: keep original column names and order; do not rename or reorder —
+  df <- tryCatch(
+    read.csv(csv_path, header = TRUE, stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e) stop("Read failed: ", csv_path, " -> ", e$message)
+  )
+
+  # Step 2: skip the first column (index); set column names to mean 1..n; then drop the first row; keep at most 755 rows
+  ## — Delete the first row (data row), then skip the first column (index column), preserving the remaining order —
+  if (nrow(df) < 2 || ncol(df) < 2) stop("Insufficient rows/columns; cannot drop the first row and skip the first column: ", csv_path)
+  dat0 <- df[-1, -1, drop = FALSE]  # first drop row -1, then column -1 (without changing the remaining order)
+
+  ## — Keep only cell columns whose original names contain “Mean” (case-insensitive), preserving the original order —
+  nm <- names(dat0)
+  nm <- trimws(gsub("\uFEFF", "", nm))   # remove BOM and trim leading/trailing whitespace
+  mean_cols <- which(grepl("(?i)mean", nm))   # Key: matches Mean1 / Mean2 / Mean… etc.
+  if (length(mean_cols) == 0) {
+    stop("No cell columns containing 'Mean' were found. Actual column names are: ", paste(nm, collapse = ", "))
+  }
+  dat <- dat0[, mean_cols, drop = FALSE]
+
+  # Convert to numeric
+  dat[] <- lapply(dat, function(x) suppressWarnings(as.numeric(x)))
+  
+  # Keep at most 755 rows (keep all if fewer than 755)
+  m <- min(755, nrow(dat))
+  if (m == 0) stop("Number of data rows is 0: ", csv_path)
+  dat <- dat[seq_len(m), , drop = FALSE]
+
+  # Step 3: compute baseline using the first 50 rows (or all rows if fewer)
+  base_rows <- min(50, nrow(dat))
+  baseline <- colMeans(dat[seq_len(base_rows), , drop = FALSE], na.rm = TRUE)
+
+  # Step 4: compute delta F = value - baseline, rename columns to cella_b_c; write baseline into the same xlsx
+  deltaF <- sweep(dat, 2, baseline, FUN = "-")
+  new_colnames <- sprintf("cell%s_%s_%d", plate_num, well_num, seq_len(ncol(dat)))
+  colnames(deltaF) <- new_colnames
+  
+  # Baseline sheet: 1 row with one column per cell (can keep a marker column Metric)
+  baseline_df <- as.data.frame(t(baseline))
+  colnames(baseline_df) <- new_colnames
+  baseline_df <- cbind(Metric = "baseline", baseline_df)
+  
+  out_dir <- dirname(csv_path)
+  write_xlsx(
+    x = list(
+      "DeltaF"   = as.data.frame(deltaF),
+      "baseline" = baseline_df
+    ),
+    path = file.path(out_dir, "Delta F divide F_chudi.xlsx")
+  )
+  # Step 5: compute dF/F (per column: deltaF / baseline), save Delta F divide F 2_chudi.xlsx
+  baseline_safe <- baseline
+  baseline_safe[is.na(baseline_safe) | baseline_safe == 0] <- NA  # prevent division by 0
+  dF_over_F <- sweep(deltaF, 2, baseline_safe, FUN = "/")
+  colnames(dF_over_F) <- new_colnames
+  write_xlsx(as.data.frame(dF_over_F), path = file.path(out_dir, "Delta F divide F 2_chudi.xlsx"))
+
+  # Step 6: add time column Time(s) to dF/F
+  # Rule: row 755 corresponds to 60 s, row 1 to 60/755; if fewer than 755 rows, time ends at the last row (60 * n / 755)
+  time_vec <- (seq_len(nrow(dF_over_F)) / 755) * 60
+  df_time <- data.frame(`Time(s)` = time_vec, as.data.frame(dF_over_F), check.names = FALSE)
+  write_xlsx(df_time, path = file.path(out_dir, "Delta F divide F 3_chudi.xlsx"))
+
+  # Step 7: compute 100 * (dF/F), also with Time(s)
+  df_time_100 <- df_time
+  df_time_100[-1] <- lapply(df_time_100[-1], function(x) x * 100)
+  write_xlsx(df_time_100, path = file.path(out_dir, "Delta F divide F 3_100_chudi.xlsx"))
+  
+  # — Return to the main workflow for merging into the ALL table and statistics —
+  return(list(
+    file = csv_path,
+    n_cells = ncol(dat),
+    df_time = df_time,               # Time(s) + dF/F for each cell
+    df_time_100 = df_time_100        # Time(s) + 100×dF/F for each cell
+  ))
+}
+
+## ========= Main workflow: iterate all subfolders under plate (pad single well to 755; ALL uses the minimum valid length) =========
+process_plate <- function(root_dir) {
+  plate_num <- digits_or_na(basename(normalizePath(root_dir, mustWork = FALSE)))
+  sub_dirs  <- list.dirs(root_dir, recursive = FALSE, full.names = TRUE)
+  if (!length(sub_dirs)) stop("No subfolders found: ", root_dir)
+
+  # Match the filenames to process (supports wildcard: *_chudi.csv)
+  target_pattern <- glob2rx(TARGET_CSV_NAME)
+
+  processed_files <- 0L
+  stats <- list()
+
+  # Collect df_time (755 rows incl. Time) and df_time_100 (755 rows incl. Time) for each well
+  all_df_time_list     <- list()
+  all_df_time_100_list <- list()
+
+  for (sd in sub_dirs) {
+    well_num <- digits_or_na(basename(sd))
+    csvs <- list.files(sd, pattern = target_pattern, full.names = TRUE, ignore.case = TRUE)
+    if (!length(csvs)) {
+      message("Skipped (no ", TARGET_CSV_NAME, "）：", sd)
+      next
+    }
+
+    for (f in csvs) {
+      res <- tryCatch(
+        process_one_file(f, plate_num, well_num),
+        error = function(e) { message("Processing failed: ", f, " -> ", e$message); NULL }
+      )
+      if (is.null(res)) next
+
+      processed_files <- processed_files + 1L
+      stats[[length(stats) + 1L]] <- list(file = res$file, n_cells = res$n_cells)
+
+      # Collect now; align uniformly when aggregating ALL
+      all_df_time_list[[length(all_df_time_list) + 1L]]         <- res$df_time
+      all_df_time_100_list[[length(all_df_time_100_list) + 1L]] <- res$df_time_100
+    }
+  }
+
+  message("All done ✅")
+  message(sprintf("Processed %d files in total this run.", processed_files))
+  if (length(stats)) {
+    for (i in seq_along(stats)) {
+      fpath  <- stats[[i]]$file
+      ncell  <- as.integer(stats[[i]]$n_cells)
+      folder <- basename(dirname(fpath))
+      fname  <- basename(fpath)
+      message(sprintf(" - %s/%s : %d cells (counted by 'Mean' columns)", folder, fname, ncell))
+    }
+  } else {
+    message("No files were processed.")
+  }
+
+  ## — ALL aggregation: align by the minimum “valid row count” across wells — ##
+  # Valid row count = after removing Time, the last row where at least one cell is finite (not NA/Inf)
+  effective_len <- function(tbl) {
+    if (!nrow(tbl)) return(0L)
+    if (ncol(tbl) < 2) return(0L)  # Time column only
+    mat <- suppressWarnings(data.matrix(tbl[, -1, drop = FALSE]))  # drop Time column
+    finite_rows <- which(rowSums(is.finite(mat)) > 0)
+    if (length(finite_rows) == 0) return(0L)
+    max(finite_rows)
+  }
+
+  if (length(all_df_time_list)) {
+    lens <- vapply(all_df_time_list, effective_len, integer(1))
+    lens <- lens[lens > 0]
+    if (length(lens)) {
+      min_len <- min(lens)
+
+      # Use the first table's first min_len time points as the ALL time axis
+      time_vec <- all_df_time_list[[1]][[1]][seq_len(min_len)]
+
+      # Concatenate dF/F
+      combined_df <- data.frame(`Time(s)` = time_vec, check.names = FALSE)
+      for (tbl in all_df_time_list) {
+        vals <- tbl[seq_len(min_len), -1, drop = FALSE]  # drop Time column
+        combined_df <- cbind(combined_df, vals)
+      }
+
+      # Concatenate 100×dF/F
+      combined_df_100 <- data.frame(`Time(s)` = time_vec, check.names = FALSE)
+      for (tbl in all_df_time_100_list) {
+        vals100 <- tbl[seq_len(min_len), -1, drop = FALSE]
+        combined_df_100 <- cbind(combined_df_100, vals100)
+      }
+
+      # — Export summary table — #
+      if (ncol(combined_df) > 1) {
+        writexl::write_xlsx(combined_df, path = file.path(root_dir, "ALL - Delta F divide F 3_chudi.xlsx"))
+      }
+      if (ncol(combined_df_100) > 1) {
+        writexl::write_xlsx(combined_df_100, path = file.path(root_dir, "ALL - Delta F divide F 3_100_chudi.xlsx"))
+      }
+
+      message(sprintf("ALL aggregation complete: unified row count = %d (minimum valid row count across wells)", min_len))
+    } else {
+      message("No valid data rows found; skipping ALL aggregation.")
+    }
+  } else {
+    message("No df_time collected; skipping ALL aggregation.")
+  }
+}
+
+
+## ========= Run =========
+process_plate(root_dir)
+
+```
+
+Generate a heatmap using all cells from a single plate
+```{r}
+## ====== Config: set the path to the ALL table ======
+file_path <- "G:/NTU_INTERN/Zhang Na/20250731 In vitro Calcium imaging with inhibitors Ptger3 KO mice/Plate 1/ALL - Delta F divide F 3_chudi.xlsx"
+
+## ====== Packages ======
+need <- c("readxl", "ComplexHeatmap", "circlize", "viridisLite", "ggplotify", "ggplot2")
+to_install <- setdiff(need, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+library(readxl)
+library(ComplexHeatmap)
+library(circlize)
+library(viridisLite)
+library(ggplotify)
+library(ggplot2)
+
+## ====== Manual color scale range (edit as needed) ======
+# Absolute range (highest priority). Set as c(min, max); set to NULL to disable.
+manual_limits <- c(-1, 2)
+
+# Whether to clip data to the color scale range (values below min -> min, above max -> max)
+cap_to_limits <- FALSE
+
+# viridis palette option ("D" is the classic; can change to "A"/"B"/"C"/"E"/"magma"/"plasma"/"inferno"/"cividis", etc.)
+viridis_option <- "D"
+n_colors <- 256
+
+## ====== Read data (default: first sheet) ======
+data <- read_excel(file_path, sheet = 1)
+
+## ====== Auto-detect time column & cell columns ======
+# 1) Find time column: prefer a column name containing "time" (case-insensitive); otherwise use the 1st column
+time_col_idx <- which(grepl("time", names(data), ignore.case = TRUE))[1]
+if (is.na(time_col_idx)) time_col_idx <- 1
+
+# 2) Convert time to numeric (if conversion fails, use row index instead)
+time_vals <- suppressWarnings(as.numeric(unlist(data[[time_col_idx]])))
+if (all(is.na(time_vals))) time_vals <- seq_len(nrow(data))
+
+# 3) Cell columns: all columns other than time that can be converted to numeric
+other_idx <- setdiff(seq_along(data), time_col_idx)
+is_num_like <- vapply(data[other_idx], function(x) {
+  if (is.numeric(x)) return(TRUE)
+  suppressWarnings(!all(is.na(as.numeric(x))))
+}, logical(1))
+cell_idx <- other_idx[is_num_like]
+
+if (!length(cell_idx)) stop("No numeric cell columns found. Please check the data.")
+
+cells_df <- data[, cell_idx, drop = FALSE]
+cells_df[] <- lapply(cells_df, function(x) suppressWarnings(as.numeric(x)))
+
+## — Convert to a numeric matrix — 
+cells_mat <- suppressWarnings(data.matrix(cells_df))  # non-numeric -> NA
+
+## — Drop columns that are all NA / all non-finite — 
+keep <- colSums(is.finite(cells_mat)) > 0
+if (!any(keep)) stop("All cell columns are empty (all NA/non-finite).")
+cells_mat <- cells_mat[, keep, drop = FALSE]
+
+## — Assemble heatmap matrix: rows=cells, columns=time points — 
+df_matrix <- t(cells_mat)
+rownames(df_matrix) <- colnames(cells_mat)
+# Align time vector length to the number of matrix columns
+colnames(df_matrix) <- round(time_vals[seq_len(nrow(cells_mat))], 3)
+
+## ====== Color range: manual / symmetric around 0 / automatic quantiles ======
+finite_vals <- df_matrix[is.finite(df_matrix)]
+if (length(finite_vals) < 2) finite_vals <- c(0, 1)  # fallback
+
+get_limits <- function(vals) {
+  if (!is.null(manual_limits)) {
+    vmin <- manual_limits[1]; vmax <- manual_limits[2]
+  } else if (isTRUE(symmetric_around_zero)) {
+    if (!is.null(sym_abs)) {
+      A <- abs(sym_abs)
+    } else {
+      A <- max(abs(vals), na.rm = TRUE)
+    }
+    vmin <- -A; vmax <- A
+  } else {
+    q <- stats::quantile(vals, probs = auto_quantiles, na.rm = TRUE)
+    vmin <- q[1]; vmax <- q[2]
+  }
+  if (!is.finite(vmin) || !is.finite(vmax) || vmin >= vmax) {
+    # On error, fall back to the data range
+    vmin <- min(vals, na.rm = TRUE); vmax <- max(vals, na.rm = TRUE)
+    if (!is.finite(vmin) || !is.finite(vmax) || vmin >= vmax) { vmin <- 0; vmax <- 1 }
+  }
+  c(vmin, vmax)
+}
+
+lims <- get_limits(finite_vals)
+vmin <- lims[1]; vmax <- lims[2]
+
+# Optional: clip data to [vmin, vmax]
+df_for_plot <- if (isTRUE(cap_to_limits)) {
+  pmin(pmax(df_matrix, vmin), vmax)
+} else {
+  df_matrix
+}
+
+# Color scale function
+# col_fun <- circlize::colorRamp2(seq(vmin, vmax, length.out = n_colors),
+#                                 viridisLite::viridis(n_colors, option = viridis_option))
+# Ensure the color scale range is [-1, 2] (already set via manual_limits above)
+cap_to_limits <- TRUE   # Optional: clip out-of-range values for consistent legend and colors
+
+# Custom segmented color scale:
+# [-1 -> 0] light blue to “deeper blue”; [0 -> 1 -> 2] deep blue -> green -> bright yellow
+# You can tweak the zero-point color: zero_blue <- "#08306b" (deeper) or "#0b3c8c" (slightly lighter)
+zero_blue <- "#08306b"
+
+col_fun <- circlize::colorRamp2(
+  c(-1, 0, 1, 2),
+  c("#441065", zero_blue, "#35b779", "#fde725")
+)
+
+## ====== Sorting: take the mean of the top 1/3 values for each cell and sort descending ======
+top_third_mean <- function(x) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(NA_real_)
+  n <- length(x); top_n <- max(1L, ceiling(n/3))
+  mean(sort(x, decreasing = TRUE)[seq_len(top_n)])
+}
+top_means <- apply(df_for_plot, 1, top_third_mean)
+row_order <- order(top_means, decreasing = TRUE, na.last = TRUE)
+df_matrix_ordered <- df_for_plot[row_order, , drop = FALSE]
+
+## ====== Plot heatmap and save ======
+# Legend title: if your data are percentages, change to "ΔF/F(%)"
+legend_title <- "ΔF/F"
+
+ht <- Heatmap(
+  df_matrix_ordered,
+  name = legend_title,
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,     # hide cell names
+  show_column_names = FALSE,  # usually hidden (too many time points)
+  row_title = legend_title,
+  column_title = "Time (s)",
+  column_title_side = "bottom",
+  heatmap_legend_param = list(
+                              at = c(-1, 0, 1, 2),
+                              labels = c("-1", "0", "1", "2"),
+                              legend_direction = "vertical",
+                              title = legend_title
+                              )
+)
+
+# Convert to ggplot and save
+p_ht <- ggplotify::as.ggplot(~ComplexHeatmap::draw(ht))
+
+# Auto-save to the same directory as the data
+out_dir <- dirname(file_path)
+# Include the color scale range in the filename for traceability
+range_tag <- sprintf("min%s_max%s",
+                     sub("\\.", "p", format(vmin, digits = 4, trim = TRUE, scientific = FALSE)),
+                     sub("\\.", "p", format(vmax, digits = 4, trim = TRUE, scientific = FALSE)))
+out_png <- file.path(out_dir, sprintf("ALL_DFF3_heatmap_%s.png", range_tag))
+
+ggsave(
+  filename = out_png,
+  plot     = p_ht,
+  width    = 10,
+  height   = 7,
+  dpi      = 300,
+  bg       = "white"
+)
+
+message("Saved: ", out_png)
+p_ht
+
+```
