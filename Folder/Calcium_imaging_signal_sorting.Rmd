@@ -1,0 +1,1614 @@
+---
+title: 'Calcium imaging signal sorting'
+author: "Chudi Zeng"
+date: "2025-08-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Calcium imaging signal sorting
+### Grouped processing
+#### Check earliest response time and group
+```{r}
+## ===== Dependencies =====
+# need <- c("readxl", "writexl", "ComplexHeatmap", "circlize")
+# to_install <- setdiff(need, rownames(installed.packages()))
+# if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+# if (!requireNamespace("viridisLite", quietly = TRUE)) install.packages("viridisLite", repos = "https://cloud.r-project.org")
+library(viridisLite)
+library(readxl); library(writexl); library(ComplexHeatmap); library(circlize)
+
+## ===== Paths =====
+file_path <- "E:/NTU_INTERN/Zhang Na/20251003 Calcium imaging_LCIS/ALL - Delta F divide F 3_chudi.xlsx"
+
+## ===== Parameters =====
+override_thresh <- 0.15          # Compare threshold directly on ΔF/F or ΔF/F(%)
+group_names    <- c("Early", "Mid", "Late")
+k_consec       <- 5                  # Consecutive-frame requirement (noise-robust): require 2 consecutive rows >= threshold # <<< Edit: explicitly centralized in one place
+
+## ===== Read and tidy table =====
+dat <- read_excel(file_path, sheet = 1)
+
+## —— Generate time vector with a fixed step: each row = 60/755 s —— ##
+dt <- 60 / 755
+time_vec <- (seq_len(nrow(dat))) * dt                  # Row 1 = 60/755 s; row n = n * 60/755 s
+
+## —— Start detection only after 5 s —— ##
+start_sec <- 5
+start_idx <- which(time_vec >= start_sec)[1]   # Row index of the first time >= 5 s
+if (is.na(start_idx)) {
+  # The entire recording is < 5 s: set detection results to NA
+  start_idx <- nrow(dat) + 1
+}
+
+## —— Only used to exclude the time column; time is no longer read from the sheet —— ##
+time_col <- which(grepl("time", names(dat), ignore.case = TRUE))[1]
+if (is.na(time_col)) {
+  cell_idx <- seq_along(dat)                           # If no time column is found, treat all columns as cell columns
+} else {
+  cell_idx <- setdiff(seq_along(dat), time_col)        # Drop the time column and keep cell columns
+}
+cells_df  <- dat[, cell_idx, drop = FALSE]
+cells_mat <- suppressWarnings(data.matrix(cells_df))   # rows = time, columns = cells
+colnames(cells_mat) <- names(cells_df)
+
+# Drop all-NA columns
+keep_col <- colSums(is.finite(cells_mat)) > 0
+cells_mat <- cells_mat[, keep_col, drop = FALSE]
+if (!ncol(cells_mat)) stop("No valid cell columns.")
+
+## ===== Threshold setting (compare directly with 0; no baseline calculation)=====
+# If the filename contains "_3_100", treat values as percent; default threshold = 10 (i.e., 10%); otherwise default threshold = 0.1
+is_percent  <- grepl("_3_100", basename(file_path), ignore.case = TRUE)
+auto_thresh <- if (is_percent) 10 else 0.1
+thresh      <- if (is.na(override_thresh)) auto_thresh else override_thresh
+
+## ===== Determine earliest response (≥ thresh) directly on ΔF/F (or ΔF/F%), only after 5 s =====
+onset_index <- rep(NA_integer_, ncol(cells_mat))
+for (j in seq_len(ncol(cells_mat))) {
+  v <- cells_mat[, j]                  # already ΔF/F (or %)
+  cond <- (v >= thresh)
+
+  # —— Ignore anything before 5 s —— #
+  if (start_idx > 1) cond[seq_len(start_idx - 1)] <- FALSE
+
+  if (k_consec > 1) {
+    s <- stats::filter(as.integer(cond), rep(1, k_consec), sides = 1)
+    idx <- which(!is.na(s) & s >= k_consec)[1]
+  } else {
+    idx <- which(cond)[1]
+  }
+
+  onset_index[j] <- if (length(idx) && !is.na(idx)) idx else NA_integer_
+}
+
+## —— Convert “earliest response time” using the fixed step —— ##
+onset_time <- ifelse(is.na(onset_index), Inf, onset_index * dt)
+
+## ===== Export “earliest response time for each cell” to Excel (before grouping)=====
+onset_time_num <- ifelse(is.infinite(onset_time), NA_real_, onset_time)
+onset_row_num  <- ifelse(is.infinite(onset_time), NA_integer_, onset_index)
+
+onset_tbl <- data.frame(
+  Cell          = colnames(cells_mat),
+  Onset_Row     = onset_row_num,                # Row/frame index where it first reaches ≥ threshold
+  Onset_Time_s  = round(onset_time_num, 3),     # row index * (60/755)
+  Responsive    = ifelse(is.infinite(onset_time), "No", "Yes"),
+  Threshold     = thresh,                        # threshold used
+  K_consec      = k_consec,                      # Consecutive-frame parameter
+  check.names   = FALSE
+)
+
+# Sort by Onset_Time_s ascending (unresponsive NA last)
+onset_tbl <- onset_tbl[order(is.na(onset_tbl$Onset_Time_s), onset_tbl$Onset_Time_s), ]
+
+# —— Assemble output filename with parameters —— #
+thr_lab <- if (is.na(thresh)) {
+  "auto"
+} else {
+  # Keep 3 significant digits to avoid scientific notation; replace '.' with 'p' (0.1 -> 0p1)
+  sub("\\.", "p", format(thresh, digits = 3, trim = TRUE, scientific = FALSE))
+}
+
+out_dir   <- dirname(file_path)
+out_onset <- file.path(out_dir, sprintf("ALL_OnsetTimes_skip5_thr%s_k%d.xlsx", thr_lab, k_consec))
+
+writexl::write_xlsx(list(OnsetTimes = onset_tbl), path = out_onset)
+
+## ===== Manual grouping: 5–10 s / 10–25 s / ≥25 s (including non-responders) =====
+group_names <- c("5–10 s", "10–25 s", "≥25 s")
+
+cell_names <- colnames(cells_mat)
+df_onset <- data.frame(cell = cell_names, onset_time = onset_time, stringsAsFactors = FALSE)
+
+# First split into three groups by condition
+cells_510   <- with(df_onset, cell[is.finite(onset_time) & onset_time >= 5  & onset_time < 10])
+cells_1025  <- with(df_onset, cell[is.finite(onset_time) & onset_time >= 10 & onset_time < 25])
+cells_25p   <- with(df_onset, cell[(is.finite(onset_time) & onset_time >= 25) | !is.finite(onset_time)])
+
+# ★ Within-group sorting: earliest onset time ascending (stable tie-breaker: cell name)
+ord_by_onset <- function(cells) {
+  if (!length(cells)) return(cells)
+  ot <- df_onset$onset_time[match(cells, df_onset$cell)]
+  cells[order(ot, cells, na.last = TRUE)]
+}
+cells_510  <- ord_by_onset(cells_510)
+cells_1025 <- ord_by_onset(cells_1025)
+
+# ≥25 s group: finite timestamps first in ascending order; non-responders (Inf) last, also stably sorted by name
+if (length(cells_25p)) {
+  ot <- df_onset$onset_time[match(cells_25p, df_onset$cell)]
+  finite_mask <- is.finite(ot)
+  cells_25p <- c(
+    cells_25p[finite_mask][order(ot[finite_mask], cells_25p[finite_mask])],
+    sort(cells_25p[!finite_mask])
+  )
+}
+
+# ★ Global row order top-to-bottom (5–10, then 10–25, then ≥25)
+row_order_all <- c(cells_510, cells_1025, cells_25p)
+
+## ===== Export to different sheets in the same Excel file (columns=cells, rows=time; first column Time(s))=====
+## —— Add threshold & consecutive-frame to filename —— ##
+thr_lab <- if (exists("thresh") && is.finite(thresh)) {
+  sub("\\.", "p", format(thresh, digits = 3, trim = TRUE, scientific = FALSE))
+} else if (exists("override_thresh") && is.finite(override_thresh)) {
+  sub("\\.", "p", format(override_thresh, digits = 3, trim = TRUE, scientific = FALSE))
+} else {
+  "auto"
+}
+k_lab <- if (exists("k_consec")) paste0("k", k_consec) else "k?"
+
+out_xlsx <- file.path(
+  out_dir,
+  sprintf("ALL_OnsetGroups_manual_5_10_25_sorted_thr%s_%s.xlsx", thr_lab, k_lab)
+)
+
+sheet_list <- list(
+  `5–10 s`  = if (length(cells_510))  data.frame(`Time(s)` = time_vec, cells_mat[, cells_510,  drop = FALSE], check.names = FALSE)  else data.frame(Info = "No cells in 5–10 s"),
+  `10–25 s` = if (length(cells_1025)) data.frame(`Time(s)` = time_vec, cells_mat[, cells_1025, drop = FALSE], check.names = FALSE)  else data.frame(Info = "No cells in 10–25 s"),
+  `≥25 s`   = if (length(cells_25p))  data.frame(`Time(s)` = time_vec, cells_mat[, cells_25p,  drop = FALSE], check.names = FALSE)  else data.frame(Info = "No cells in ≥25 s")
+)
+
+# writexl::write_xlsx(sheet_list, path = out_xlsx)
+```
+
+### Single-sample plotting
+#### Plot grouped heatmap for a single sample
+```{R}
+## —— Heatmap uses only “responsive” cells —— 
+cells_510_h  <- cells_510                                   # 5–10 s responsive within
+cells_1025_h <- cells_1025                                  # 10–25 s responsive within
+cells_25p_h  <- with(df_onset, cell[is.finite(onset_time) & onset_time >= 25])  # ≥25 s and responsive（exclude NA/Inf）
+# Within each group, sort by onset ascending (stable ties broken by cell name)
+ord_by_onset <- function(cells) {
+  if (!length(cells)) return(cells)
+  ot <- df_onset$onset_time[match(cells, df_onset$cell)]
+  cells[order(ot, cells, na.last = TRUE)]
+}
+cells_510_h  <- ord_by_onset(cells_510_h)
+cells_1025_h <- ord_by_onset(cells_1025_h)
+cells_25p_h  <- ord_by_onset(cells_25p_h)
+
+## ===== Build three small heatmaps and stack them vertically (hide row names; draw in the sorted order)=====
+ht_mat <- t(cells_mat)
+colnames(ht_mat) <- round(time_vec, 3)
+
+# Global color mapping (viridis: purple → blue → green → yellow)
+finite_vals <- ht_mat[is.finite(ht_mat)]
+if (length(finite_vals) < 2) finite_vals <- c(0, 1)
+q <- stats::quantile(finite_vals, probs = c(0.001, 0.999), na.rm = TRUE)
+
+pal <- viridisLite::viridis(256, option = "D")  # "D" is the classic viridis
+col_fun <- circlize::colorRamp2(seq(q[1], q[2], length.out = 256), pal)
+
+
+# Global font settings (adjust as needed)
+title_fs  <- 9   # Group label “5–10 s (n=…)” font size（was larger by default）
+legend_t  <- 9   # legend title font size
+legend_lb <- 8   # legend label font size
+
+make_ht <- function(cells, title, is_bottom = FALSE) {
+  if (!length(cells)) return(NULL)
+  mat <- ht_mat[cells, , drop = FALSE]
+  Heatmap(
+    mat,
+    name = if (is_percent) "ΔF/F(%)" else "ΔF/F",
+    col = col_fun,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    show_row_names = FALSE,                 # Do not show cell names
+    show_column_names = FALSE,
+    row_title = sprintf("%s (n=%d)", title, nrow(mat)),
+    row_title_gp = grid::gpar(fontsize = title_fs),                # ← shrink group-title font
+    column_title = if (is_bottom) "Time (s)" else NULL,            # show only at the very bottom
+    column_title_side = "bottom",
+    column_title_gp = grid::gpar(fontsize = title_fs),             # x-axis title font
+    heatmap_legend_param = list(                                   # make legend fonts a bit smaller too
+      title_gp  = grid::gpar(fontsize = legend_t),
+      labels_gp = grid::gpar(fontsize = legend_lb)
+    )
+  )
+}
+
+# Use your existing group order: 5–10 → 10–25 → ≥25
+groups <- list(
+  list(cells = cells_510_h,  title = "5–10 s"),
+  list(cells = cells_1025_h, title = "10–25 s"),
+  list(cells = cells_25p_h,  title = "≥25 s")
+)
+nonempty_idx <- which(vapply(groups, function(g) length(g$cells) > 0, logical(1)))
+last_nonempty <- if (length(nonempty_idx)) tail(nonempty_idx, 1) else integer(0)
+
+ht_list <- lapply(seq_along(groups), function(i) {
+  if (!length(groups[[i]]$cells)) return(NULL)
+  make_ht(groups[[i]]$cells, groups[[i]]$title, is_bottom = (i == last_nonempty))
+})
+ht_list <- ht_list[!vapply(ht_list, is.null, logical(1))]
+if (!length(ht_list)) stop("No heatmap group to plot.")
+
+ht_all <- Reduce(`%v%`, ht_list)   # vertical concatenation
+
+## === Auto-name (with threshold and consecutive-frame setting) and save to the same folder as the data ===
+thr_lab <- if (is.na(thresh)) {
+  "auto"
+} else {
+  # e.g. 0.1 -> "0p1"（replace '.' with 'p' to avoid extra dots）
+  sub("\\.", "p", format(thresh, digits = 3, trim = TRUE, scientific = FALSE))
+}
+out_dir  <- dirname(file_path)
+png_file <- file.path(out_dir, sprintf("ALL_OnsetGroups_manual_5_10_25_sorted_thr%s_k%d.png", thr_lab, k_consec))
+pdf_file <- file.path(out_dir, sprintf("ALL_OnsetGroups_manual_5_10_25_sorted_thr%s_k%d.pdf",  thr_lab, k_consec))
+
+# —— Save PNG (raster image, for reports/slides)——
+png(png_file, width = 2400, height = 1800, res = 300, bg = "white")
+draw(ht_all, padding = grid::unit(c(5, 5, 20, 5), "pt"))
+dev.off()
+
+# —— Save PDF (vector image, for papers/high-res zooming)——
+# pdf(pdf_file, width = 10, height = 7, onefile = FALSE, paper = "special")
+# draw(ht_all, padding = grid::unit(c(5, 5, 20, 5), "pt"))
+# dev.off()
+
+message("Saved: ", png_file)
+# message("Saved: ", pdf_file)
+```
+
+#### Plot grouped line chart for a single sample
+```{r}
+## Requires: patchwork (plot stitching)
+need2 <- c("ggplot2", "patchwork")
+to_install2 <- setdiff(need2, rownames(installed.packages()))
+if (length(to_install2)) install.packages(to_install2, repos = "https://cloud.r-project.org")
+if (!requireNamespace("grid", quietly = TRUE)) install.packages("grid")
+library(grid)
+library(ggplot2); library(patchwork)
+
+## —— Use only “responsive” cells —— 
+cells_510_h  <- cells_510                                   # 5–10 s responsive within
+cells_1025_h <- cells_1025                                  # 10–25 s responsive within
+cells_25p_h  <- with(df_onset, cell[is.finite(onset_time) & onset_time >= 25])  # ≥25 s and responsive（exclude NA/Inf）
+# Within each group, sort by onset ascending (stable ties broken by cell name)
+ord_by_onset <- function(cells) {
+  if (!length(cells)) return(cells)
+  ot <- df_onset$onset_time[match(cells, df_onset$cell)]
+  cells[order(ot, cells, na.last = TRUE)]
+}
+cells_510_h  <- ord_by_onset(cells_510_h)
+cells_1025_h <- ord_by_onset(cells_1025_h)
+cells_25p_h  <- ord_by_onset(cells_25p_h)
+
+## ====== Font-size standard (GraphPad → R/ggplot2)======
+x_tick_pt <- 18  # x-axis tick pt (custom x-axis uses geom_text)
+y_tick_pt <- 18  # y-axis tick pt
+title_pt  <- 20  # panel title pt
+pt2mm <- function(pt) pt / 2.8453   # for geom_text/annotate("text")
+
+## ====== Color scheme (manually change colors here)======
+col_mean     <- "#F28E2B"  # mean line color
+col_ribbon   <- "#F28E2B"  # 95% CI fill color
+# col_mean     <- "#808080"  # mean line color
+# col_ribbon   <- "#808080"  # 95% CI fill color
+ribbon_alpha <- 0.35
+col_shade    <- "grey70"   # 3–5 s shading
+shade_alpha  <- 0.5
+axis_col     <- "black"    # axis lines, ticks, and text color
+legend_loc   <- c(0.90, 0.98) # legend position in the first plot (NDC)
+
+## ===== Manual y-axis configuration =====
+y_manual <- list(
+  `5–10 s`  = list(lims = c(-25, 75), breaks = seq(-25, 75, 25)),
+  `10–25 s` = list(lims = c(-25, 125), breaks = seq(-25, 125, 25)),
+  `≥25 s`   = list(lims = c(-100, 150), breaks = seq(-100, 150, 50))
+
+)
+
+# —— Keep only a single-line legend ——
+legend_keep  <- "PGE2"
+legend_label <- c(PGE2 = "PGE2")
+
+## === Per-group summary: multiply by *100 first, then compute mean and 95% CI; when n<=1 keep ribbon continuous ===
+summarize_group <- function(cell_names) {
+  if (!length(cell_names)) return(NULL)
+  sub_mat <- cells_mat[, cell_names, drop = FALSE] * 100
+
+  row_mean <- rowMeans(sub_mat, na.rm = TRUE)
+  row_sd   <- apply(sub_mat, 1, function(x) sd(x, na.rm = TRUE))
+  row_n    <- apply(sub_mat, 1, function(x) sum(is.finite(x)))
+  row_se   <- ifelse(row_n > 1, row_sd / sqrt(row_n), NA_real_)
+
+  alpha <- 0.05
+  tcrit <- qt(1 - alpha/2, df = pmax(row_n - 1, 1))
+
+  lower <- row_mean - tcrit * row_se
+  upper <- row_mean + tcrit * row_se
+
+  # When n<=1 or NA, collapse CI to mean to avoid broken ribbon
+  bad <- !is.finite(lower) | !is.finite(upper)
+  lower[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+  upper[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+
+  data.frame(time = time_vec, mean = row_mean, lower = lower, upper = upper, n = row_n)
+}
+
+## === Adaptive y-axis (used only when not manually set; here we already set it manually) ===
+y_params_from_df <- function(df,
+                             n_breaks_target = 5,
+                             include_zero     = TRUE,
+                             pad_frac         = 0.10,
+                             min_neg          = 5,
+                             tick_frac        = 0.05,
+                             label_frac       = 0.08,
+                             edge_margin_frac = 0.02) {
+  vals <- c(df$lower, df$upper, df$mean)
+  vals <- vals[is.finite(vals)]
+  if (!length(vals)) {
+    return(list(lims = c(-10, 40),
+                breaks = pretty(c(-10, 40), n = n_breaks_target),
+                label_y = -7, tick_len = 2))
+  }
+
+  y0 <- min(vals); y1 <- max(vals)
+  span <- max(y1 - y0, 1e-6)
+  pad  <- max(2, pad_frac * span)
+  y0 <- y0 - pad
+  y1 <- y1 + pad
+
+  if (include_zero) { y0 <- min(y0, 0); y1 <- max(y1, 0) }
+  if (y0 >= 0) y0 <- -min_neg else y0 <- min(y0, -min_neg)
+
+  brks <- pretty(c(y0, y1), n = n_breaks_target)
+  lims <- range(c(brks, y0, y1))
+  if (include_zero && all(abs(brks - 0) > .Machine$double.eps^0.5)) {
+    brks <- sort(c(brks, 0)); lims <- range(c(brks, y0, y1))
+  }
+
+  rng      <- diff(lims)
+  tick_len <- tick_frac  * rng
+  label_y  <- 0 - label_frac * rng
+  needed_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+  if (lims[1] > needed_min) {
+    lims[1] <- needed_min
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+    brks     <- pretty(lims, n = n_breaks_target)
+    if (include_zero && all(abs(brks - 0) > .Machine$double.eps^0.5))
+      brks <- sort(c(brks, 0))
+  }
+
+  list(lims = lims, breaks = brks, label_y = label_y, tick_len = tick_len)
+}
+
+get_y_params <- function(df, title, y_manual = NULL, n_breaks_target = 5,
+                         tick_frac = 0.05, label_frac = 0.08, edge_margin_frac = 0.02) {
+  # Manual config provided → use it
+  if (!is.null(y_manual) && title %in% names(y_manual)) {
+    man <- y_manual[[title]]
+    lims <- man$lims %||% NULL
+    breaks <- man$breaks %||% NULL
+
+    if (is.null(lims) && !is.null(breaks)) lims <- range(breaks, na.rm = TRUE)
+    if (is.null(lims)) {
+      return(y_params_from_df(df, n_breaks_target = n_breaks_target, include_zero = TRUE))
+    }
+    if (length(lims) != 2 || !is.finite(diff(lims)) || diff(lims) <= 0)
+      stop(sprintf("Invalid manual y-axis lims setting：%s", paste(lims, collapse = ",")))
+
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+
+    needed_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+    if (lims[1] > needed_min) {
+      lims[1] <- needed_min
+      rng      <- diff(lims)
+      tick_len <- tick_frac  * rng
+      label_y  <- 0 - label_frac * rng
+    }
+
+    if (is.null(breaks)) breaks <- pretty(lims, n = n_breaks_target)
+    if (lims[1] <= 0 && lims[2] >= 0 && all(abs(breaks - 0) > .Machine$double.eps^0.5))
+      breaks <- sort(c(breaks, 0))
+
+    return(list(lims = lims, breaks = breaks, label_y = label_y, tick_len = tick_len))
+  }
+
+  # No manual config → use automatic
+  y_params_from_df(df, n_breaks_target = n_breaks_target, include_zero = TRUE)
+}
+
+# Helper: base R has no %||%, define one here
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+## Unify x-axis: 0–60 with a tick every 5 s
+x_max    <- 60
+x_breaks <- seq(5, 60, by = 5)
+
+## Unify line width
+axis_lw <- 0.7
+tick_lw <- 0.7
+
+make_line_panel <- function(cell_names, title, is_bottom = FALSE, show_legend = FALSE) {
+  df <- summarize_group(cell_names)          # already multiplied by *100
+  if (is.null(df)) {
+    # Empty-group placeholder (use 12 pt text here)
+    return(
+      ggplot() +
+        annotate("text", x = 30, y = 0,
+                 label = paste("No responsive cells in", title),
+                 size = pt2mm(12), colour = axis_col) +
+        coord_cartesian(xlim = c(0, x_max), ylim = c(-10, 40), expand = FALSE) +
+        theme_void() +
+        theme(plot.margin = unit(c(5, 5, if (is_bottom) 14 else 5, 5), "pt"))
+    )
+  }
+
+  yp <- get_y_params(df, title, y_manual, n_breaks_target = 5)
+
+  ggplot(df, aes(x = time, y = mean)) +
+    # Grey shading (3–5 s)
+    annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf,
+             fill = col_shade, alpha = shade_alpha) +
+    # 95% CI (not in legend)
+    geom_ribbon(aes(ymin = lower, ymax = upper),
+                fill = col_ribbon, alpha = ribbon_alpha, show.legend = FALSE) +
+    # Mean line — map a constant to color here to create a “single-line” legend
+    geom_line(
+      data = transform(df, .legend = legend_keep),
+      aes(y = mean, color = .legend),
+      linewidth = 1,
+      show.legend = show_legend
+    ) +
+    # Color scale: keep only one legend item
+    scale_color_manual(
+      values = setNames(col_mean, legend_keep),
+      breaks = legend_keep,
+      labels = legend_label,
+      name   = NULL
+    ) +
+    guides(color = if (show_legend) guide_legend(override.aes = list(linewidth = 1.2)) else "none") +
+    # x-axis: unified 0–60; y-axis: adaptive per group (or manual)
+    scale_x_continuous(limits = c(0, x_max),
+                       breaks = x_breaks,
+                       expand = expansion(mult = c(0, 0.02))) +
+    scale_y_continuous(limits = yp$lims,
+                       breaks = yp$breaks,
+                       expand = c(0, 0)) +
+    coord_cartesian(clip = "off") +
+    ggtitle(title) +                              # —— no longer append (n=...)
+    theme_classic(base_size = y_tick_pt) +        # base 12 pt
+    theme(
+      plot.title.position = "plot",
+      plot.title = element_text(size = title_pt, hjust = 0, colour = axis_col),
+      legend.position      = if (show_legend) legend_loc else "none",  # show only when needed
+      legend.justification = c(1, 1),
+      legend.background    = element_rect(fill = scales::alpha("white", 0.6), colour = NA),
+      legend.key           = element_blank(),
+      legend.text  = element_text(size = 16),
+      legend.title = element_text(size = 16),
+      axis.line.x   = element_blank(),
+      axis.ticks.x  = element_blank(),
+      axis.text.x   = element_blank(),                 # hide default x ticks
+      axis.line.y   = element_line(linewidth = axis_lw, colour = axis_col),
+      axis.ticks.y  = element_line(linewidth = tick_lw, colour = axis_col),
+      axis.text.y   = element_text(colour = axis_col, size = y_tick_pt),
+      axis.title.y  = element_text(margin = margin(r = 10), size = 20, colour = axis_col),
+      axis.title.x  = element_text(size = 16, colour = axis_col, margin = margin(t = 6)),
+      plot.margin   = unit(c(5, 5, if (is_bottom) 14 else 5, 5), "pt"),
+      
+    ) +
+    # —— Custom x-axis (fixed at y=0; consistent across panels) —— 
+    geom_hline(yintercept = 0, linewidth = axis_lw, colour = axis_col) +
+    geom_segment(
+      data = data.frame(x = x_breaks),
+      aes(x = x, xend = x, y = 0, yend = 0 - yp$tick_len),
+      inherit.aes = FALSE, linewidth = tick_lw, colour = axis_col
+    ) +
+    geom_text(
+      data = data.frame(x = x_breaks, lab = x_breaks),
+      aes(x = x, y = yp$label_y, label = lab),
+      inherit.aes = FALSE, vjust = 1, size = pt2mm(x_tick_pt), colour = axis_col
+    ) +
+    labs(x = if (is_bottom) "Time (s)" else NULL,
+         y = expression(Delta*F/F~"(%)"))
+}
+
+## === Generate three panels and vertically concatenate (only bottom shows Time(s)) ===
+p1 <- make_line_panel(cells_510_h,  "5–10 s",  is_bottom = FALSE, show_legend = TRUE)  # legend shown only here
+p2 <- make_line_panel(cells_1025_h, "10–25 s", is_bottom = FALSE, show_legend = FALSE)
+p3 <- make_line_panel(cells_25p_h,  "≥25 s",   is_bottom = TRUE,  show_legend = FALSE)
+
+# Ensure patchwork is available
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  install.packages("patchwork", repos = "https://cloud.r-project.org")
+}
+# vertical concatenation (keep each panel's legends; do not merge to the overall right side)
+p_stack <- patchwork::wrap_plots(p1, p2, p3, ncol = 1, guides = "keep")
+
+## === Auto-save (same folder as data, with threshold and consecutive-frame) ===
+thr_lab <- if (is.na(thresh)) "auto" else sub("\\.", "p", format(thresh, digits = 3, trim = TRUE, scientific = FALSE))
+out_dir  <- dirname(file_path)
+png_file <- file.path(out_dir, sprintf("ALL_OnsetGroups_manual_5_10_25_LINES_thr%s_k%d.png", thr_lab, k_consec))
+pdf_file <- file.path(out_dir, sprintf("ALL_OnsetGroups_manual_5_10_25_LINES_thr%s_k%d.pdf",  thr_lab, k_consec))
+
+ggsave(png_file, plot = p_stack, width = 7, height = 9, dpi = 300, bg = "white")
+# If you need PDF:
+# ggsave(pdf_file, plot = p_stack, width = 7, height = 9, device = "pdf", bg = "white")
+
+message("Saved: ", png_file)
+# message("Saved: ", pdf_file)
+
+
+
+```
+
+
+### Multi-sample plotting
+#### Two-sample grouping
+Group + Group
+```{r}
+## ===== packages =====
+need <- c("readxl","ggplot2","patchwork","stringr","scales")
+to_install <- setdiff(need, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+library(readxl); library(ggplot2); library(patchwork); library(stringr); library(scales)
+
+`%||%` <- function(a,b) if (!is.null(a)) a else b
+
+## ====== Font size (GraphPad-aligned)======
+x_tick_pt <- 18    # x-axis ticks (pt)
+y_tick_pt <- 18    # y-axis ticks (pt)
+title_pt  <- 20    # panel title (pt)
+pt2mm <- function(pt) pt / 2.8453   # for geom_text/annotate("text")
+
+## ====== Parameters: two files & labels/colors & output directory ======
+# Condition A（PGE2）
+groups_A <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_A  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+label_A  <- "Wide type"            # legend display name
+# col_A    <- "#F28E2B"       # orange
+col_A <- "#000000"
+
+# Condition B（Ptger3^{flox/flox}） - 4
+groups_B <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_B  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+label_B  <- 'Ptger3^{"flox/flox"}'   # plotmath
+# col_B    <- "#808080"                  # grey
+col_B <- "#F28E2B" 
+
+# Output directory
+out_dir  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250901 line chart/4"
+
+## —— Legend position fine-tuning (legend only in the first plot) ——
+legend_inset <- c(0.01, 0.01)  # leave 1% margin from the top-right corner
+
+## === Optional: Manual y-axis settings per panel (set to NULL if not needed)
+y_manual <- list(
+  `5–10 s`  = list(lims = c(-40, 80), breaks = seq(-40, 80, 20)),
+  `10–25 s` = list(lims = c(-30, 120), breaks = seq(-30, 120, 30)),
+  `≥25 s`   = list(lims = c(-20, 40), breaks = seq(-20, 40, 10))
+)
+
+## ====== Read 3 grouped sheets (columns = cells, first column = Time)======
+read_group_sheets <- function(path){
+  sh <- readxl::excel_sheets(path)
+  pat_510  <- "^\\s*5\\s*(?:-|–|—|to|~)\\s*10\\b"
+  pat_1025 <- "^\\s*10\\s*(?:-|–|—|to|~)\\s*25\\b"
+  pat_25p  <- "^\\s*(?:≥|>=)\\s*25\\b|^\\s*25\\s*\\+\\b|^\\s*25\\s*(?:plus|or\\s*more)\\b"
+  pick <- function(pat){ idx <- grep(pat, sh, ignore.case = TRUE, perl = TRUE); if (length(idx)) sh[idx[1]] else NA_character_ }
+  s1 <- pick(pat_510); s2 <- pick(pat_1025)
+  idx25 <- setdiff(grep(pat_25p, sh, ignore.case = TRUE, perl = TRUE), grep(pat_1025, sh, ignore.case = TRUE, perl = TRUE))
+  s3 <- if (length(idx25)) sh[idx25[1]] else NA_character_
+  rd <- function(s){ if (is.na(s)) return(NULL); suppressWarnings(readxl::read_excel(path, sheet = s)) }
+  list(`5–10 s` = rd(s1), `10–25 s` = rd(s2), `≥25 s` = rd(s3))
+}
+
+## ====== Compute mean ± 95% CI for a single group (*100; when n<=1, CI collapses to the mean band)======
+summarize_group_df <- function(df){
+  if (is.null(df) || ncol(df) < 2) return(NULL)
+  tcol <- which(grepl("time", names(df), ignore.case = TRUE))[1]; if (is.na(tcol)) tcol <- 1
+  time <- suppressWarnings(as.numeric(unlist(df[[tcol]])))
+  mat  <- suppressWarnings(data.matrix(df[ , setdiff(seq_along(df), tcol), drop = FALSE])) * 100
+  row_mean <- rowMeans(mat, na.rm = TRUE)
+  row_sd   <- apply(mat, 1, function(x) sd(x, na.rm = TRUE))
+  row_n    <- apply(mat, 1, function(x) sum(is.finite(x)))
+  row_se   <- ifelse(row_n > 1, row_sd / sqrt(row_n), NA_real_)
+  tcrit    <- qt(0.975, df = pmax(row_n - 1, 1))
+  lower <- row_mean - tcrit * row_se
+  upper <- row_mean + tcrit * row_se
+  bad   <- !is.finite(lower) | !is.finite(upper)
+  lower[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+  upper[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+  list(df = data.frame(time = time, mean = row_mean, lower = lower, upper = upper, n = row_n),
+       n_cells = ncol(mat))
+}
+
+## ====== Panel y-axis (determined by both conditions; fully cover 95% CI and include negatives)======
+y_params_merge <- function(dfA, dfB, y_manual_one = NULL,
+                           n_breaks_target = 5, pad_frac = 0.20,
+                           min_neg = 5, tick_frac = 0.05, label_frac = 0.08, edge_margin_frac = 0.02){
+  if (!is.null(y_manual_one)){
+    lims <- y_manual_one$lims %||% NULL
+    brks <- y_manual_one$breaks %||% NULL
+    if (is.null(lims) && !is.null(brks)) lims <- range(brks, na.rm = TRUE)
+    if (is.null(lims)) stop("Manual y-axis requires at least lims")
+  } else {
+    vals <- c(dfA$lower, dfA$upper, dfA$mean, dfB$lower, dfB$upper, dfB$mean)
+    vals <- vals[is.finite(vals)]
+    y0 <- min(vals); y1 <- max(vals)
+    span <- max(y1 - y0, 1e-6); pad <- max(2, pad_frac * span)
+    y0 <- y0 - pad; y1 <- y1 + pad
+    y0 <- min(y0, 0); y1 <- max(y1, 0)
+    if (y0 >= 0) y0 <- -min_neg else y0 <- min(y0, -min_neg)
+    brks <- pretty(c(y0, y1), n = n_breaks_target)
+    lims <- range(c(brks, y0, y1))
+    if (all(abs(brks - 0) > .Machine$double.eps^0.5)) { brks <- sort(c(brks, 0)); lims <- range(c(brks, y0, y1)) }
+  }
+  if (is.null(brks)) brks <- pretty(lims, n = n_breaks_target)
+  rng      <- diff(lims)
+  tick_len <- tick_frac  * rng
+  label_y  <- 0 - label_frac * rng
+  need_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+  if (lims[1] > need_min) {
+    lims[1] <- need_min
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+    brks     <- pretty(lims, n = n_breaks_target)
+    if (all(abs(brks - 0) > .Machine$double.eps^0.5)) brks <- sort(c(brks, 0))
+  }
+  list(lims=lims, breaks=brks, tick_len=tick_len, label_y=label_y)
+}
+
+## —— Prepare legend breaks/labels (show A & B; B uses plotmath) ——
+label_A_expr <- as.expression(label_A)
+label_B_expr <- parse(text = label_B)
+legend_breaks  <- c(label_A, label_B)                   # must match the factor levels in the data
+legend_labels  <- list(label_A_expr, label_B_expr)      # expression vector (also convert plain-text A to expression)
+
+## ====== Draw a single merged panel: overlay two conditions on one plot (show AB legend only on selected panel) ======
+make_merged_panel <- function(sumA, sumB, panel_title,
+                              col_A, col_B,
+                              show_bottom_x = FALSE,
+                              y_manual_all = NULL,
+                              show_legend = FALSE) {
+  axis_col <- "black"
+  dfA <- if (is.null(sumA)) NULL else sumA$df
+  dfB <- if (is.null(sumB)) NULL else sumB$df
+  if (is.null(dfA) && is.null(dfB)) {
+    return(
+      ggplot() +
+        annotate("text", x = 30, y = 0, label = paste("No data in", panel_title),
+                 size = pt2mm(12)) +
+        coord_cartesian(xlim = c(0, 60), ylim = c(-10, 40), expand = FALSE) +
+        theme_void()
+    )
+  }
+
+  yman <- if (is.null(y_manual_all)) NULL else y_manual_all[[panel_title]]
+  if (is.null(dfA)) dfA <- transform(dfB, mean = NA, lower = NA, upper = NA)
+  if (is.null(dfB)) dfB <- transform(dfA, mean = NA, lower = NA, upper = NA)
+  yp <- y_params_merge(dfA, dfB, y_manual_one = yman)
+
+  labA <- label_A; labB <- label_B
+  dd <- rbind(
+    if (!is.null(sumA)) transform(sumA$df, condition = labA) else NULL,
+    if (!is.null(sumB)) transform(sumB$df, condition = labB) else NULL
+  )
+  dd$condition <- factor(dd$condition, levels = c(labA, labB))
+
+  x_breaks <- seq(5, 60, by = 5)
+  axis_lw  <- 0.7
+  tick_lw  <- 0.7
+
+  ggplot(dd, aes(x = time)) +
+    annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf,
+             fill = "grey70", alpha = 0.5) +
+
+    ## Draw shadow
+    geom_ribbon(
+      data = dd[dd$condition == labB, , drop = FALSE],
+      aes(ymin = lower, ymax = upper),
+      inherit.aes = TRUE,
+      fill = scales::alpha(col_B, 0.25), # Higher value → more opaque
+      show.legend = FALSE
+    ) +
+    geom_ribbon(
+      data = dd[dd$condition == labA, , drop = FALSE],
+      aes(ymin = lower, ymax = upper),
+      inherit.aes = TRUE,
+      fill = scales::alpha(col_A, 0.2),
+      show.legend = FALSE
+    ) +
+
+    geom_line(aes(y = mean, color = condition), linewidth = 1, show.legend = show_legend) +
+
+    scale_color_manual(
+      values = setNames(c(col_A, col_B), c(labA, labB)),
+      breaks = legend_breaks,
+      labels = legend_labels,
+      name   = NULL
+    ) +
+    guides(color = if (show_legend) guide_legend(override.aes = list(linewidth = 1.5)) else "none") +
+
+    scale_x_continuous(limits = c(0, 60), breaks = x_breaks, expand = expansion(mult = c(0, 0.02))) +
+    scale_y_continuous(limits = yp$lims, breaks = yp$breaks, expand = c(0, 0)) +
+    coord_cartesian(clip = "off") +
+    ggtitle(panel_title) +
+    theme_classic(base_size = y_tick_pt) +
+    theme(
+      plot.title.position = "plot",
+      plot.title = element_text(size = title_pt, hjust = 0, colour = axis_col),
+
+      legend.position       = if (show_legend) c(1 - legend_inset[1], 1 - legend_inset[2]) else "none",
+      legend.justification  = c(1, 1),
+      legend.background     = element_rect(fill = scales::alpha("white", 0.6), colour = NA),
+      legend.key            = element_blank(),
+      legend.text  = element_text(size = 16),
+      legend.title = element_text(size = 16),
+
+      axis.line.x   = element_blank(),
+      axis.ticks.x  = element_blank(),
+      axis.text.x   = element_blank(),
+      axis.title.x  = element_text(size = 20, margin = margin(t = 10)),
+      axis.line.y   = element_line(linewidth = axis_lw, colour = axis_col),
+      axis.ticks.y  = element_line(linewidth = tick_lw, colour = axis_col),
+      axis.text.y   = element_text(colour = axis_col, size = y_tick_pt),
+      axis.title.y  = element_text(margin = margin(r = 10), size = 20, colour = axis_col),
+      plot.margin   = unit(c(5, 5, if (show_bottom_x) 14 else 5, 5), "pt")
+    ) +
+    geom_hline(yintercept = 0, linewidth = axis_lw, colour = axis_col) +
+    geom_segment(data = data.frame(x = x_breaks),
+                 aes(x = x, xend = x, y = 0, yend = 0 - yp$tick_len),
+                 inherit.aes = FALSE, linewidth = tick_lw, colour = axis_col) +
+    geom_text(data = data.frame(x = x_breaks, lab = x_breaks),
+              aes(x = x, y = yp$label_y, label = lab),
+              inherit.aes = FALSE, vjust = 1, size = pt2mm(x_tick_pt), colour = axis_col) +
+    labs(x = if (show_bottom_x) "Time (s)" else NULL,
+         y = expression(Delta*F/F~"(%)"))
+}
+
+## ====== Read two files and generate three panels (legend only in the first) ======
+ga <- read_group_sheets(groups_A)
+gb <- read_group_sheets(groups_B)
+
+sA_510  <- summarize_group_df(ga[["5–10 s"]])
+sA_1025 <- summarize_group_df(ga[["10–25 s"]])
+sA_25p  <- summarize_group_df(ga[["≥25 s"]])
+
+sB_510  <- summarize_group_df(gb[["5–10 s"]])
+sB_1025 <- summarize_group_df(gb[["10–25 s"]])
+sB_25p  <- summarize_group_df(gb[["≥25 s"]])
+
+# Print cell counts per group for debugging
+cat("Condition A - 5-10s cells:", if(!is.null(sA_510)) sA_510$n_cells else 0, "\n")
+cat("Condition A - 10-25s cells:", if(!is.null(sA_1025)) sA_1025$n_cells else 0, "\n")
+cat("Condition A - ≥25s cells:", if(!is.null(sA_25p)) sA_25p$n_cells else 0, "\n")
+cat("Condition B - 5-10s cells:", if(!is.null(sB_510)) sB_510$n_cells else 0, "\n")
+cat("Condition B - 10-25s cells:", if(!is.null(sB_1025)) sB_1025$n_cells else 0, "\n")
+cat("Condition B - ≥25s cells:", if(!is.null(sB_25p)) sB_25p$n_cells else 0, "\n")
+
+p1 <- make_merged_panel(sA_510,  sB_510,  "5–10 s",  col_A, col_B, FALSE, y_manual, show_legend = TRUE)   # Show AB legend in the first plot
+p2 <- make_merged_panel(sA_1025, sB_1025, "10–25 s", col_A, col_B, FALSE, y_manual, show_legend = FALSE)
+p3 <- make_merged_panel(sA_25p,  sB_25p,  "≥25 s",   col_A, col_B, TRUE,  y_manual, show_legend = FALSE)
+
+## ====== Combine into one figure and save (do not collect external legends) ======
+get_thr_k <- function(onset){
+  bn <- basename(onset)
+  thr <- str_match(bn, "thr([0-9p\\.]+)")[,2] %||% "auto"
+  k   <- str_match(bn, "k(\\d+)")[,2]        %||% "k?"
+  paste0(thr, "_k", gsub("\\D","", k))
+}
+tkA <- get_thr_k(onset_A)
+
+p_stack <- patchwork::wrap_plots(p1, p2, p3, ncol = 1) +
+           patchwork::plot_layout(heights = c(1,1,1))
+
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+png_file <- file.path(out_dir, sprintf("MERGED_three_panels_%s_vs_%s_%s.png",
+                                       gsub("[^A-Za-z0-9]+","", label_A),
+                                       gsub("[^A-Za-z0-9]+","", label_B),
+                                       tkA))
+ggsave(png_file, plot = p_stack, width = 7, height = 9, dpi = 300, bg = "white")
+cat("Saved:", normalizePath(png_file), "\n")
+```
+
+### Three-sample grouping
+```{r}
+## ===== packages =====
+need <- c("readxl","ggplot2","patchwork","stringr","scales")
+to_install <- setdiff(need, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+library(readxl); library(ggplot2); library(patchwork); library(stringr); library(scales)
+
+`%||%` <- function(a,b) if (!is.null(a)) a else b
+
+## ====== Parameters: three files & labels/colors & output directory ======
+# Condition A
+groups_A <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_A  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+label_A  <- "PGE2"
+col_A    <- "#F28E2B"
+
+# Condition B
+groups_B <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_B  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+label_B  <- "LCIS"
+col_B    <- "#000000"
+
+# Condition C
+groups_C <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_C  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+label_C  <- "L-798106"
+col_C    <- "#4AC818"
+
+# Output directory
+out_dir  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/merged_panels_sorted"
+
+## === Optional: Manual y-axis settings per panel (set to NULL if not needed)
+# y_manual <- NULL
+y_manual <- list(
+  `5–10 s`  = list(lims = c(-50,  75),  breaks = seq(-50, 75, 25)),
+  `10–25 s` = list(lims = c(-30, 120),  breaks = seq(-30, 120, 30)),
+  `≥25 s`   = list(lims = c(-20,  40),  breaks = seq(-20, 40, 10))
+)
+
+## ====== Read 3 grouped sheets (columns = cells, first column = Time)======
+read_group_sheets <- function(path){
+  sh <- readxl::excel_sheets(path)
+
+  # Compatible with various hyphens; use strict matching anchored at start
+  pat_510  <- "^\\s*5\\s*(?:-|–|—|to|~)\\s*10\\b"
+  pat_1025 <- "^\\s*10\\s*(?:-|–|—|to|~)\\s*25\\b"
+  # “≥25 s” must start with ≥/>=, or forms like 25+ / 25 plus / 25 or more
+  pat_25p  <- "^\\s*(?:≥|>=)\\s*25\\b|^\\s*25\\s*\\+\\b|^\\s*25\\s*(?:plus|or\\s*more)\\b"
+
+  pick <- function(pat){
+    idx <- grep(pat, sh, ignore.case = TRUE, perl = TRUE)
+    if (length(idx)) sh[idx[1]] else NA_character_
+  }
+
+  s1 <- pick(pat_510)
+  s2 <- pick(pat_1025)
+
+  # For ≥25: strict match and exclude 10–25
+  idx25 <- grep(pat_25p, sh, ignore.case = TRUE, perl = TRUE)
+  idx1025 <- grep(pat_1025, sh, ignore.case = TRUE, perl = TRUE)
+  idx25 <- setdiff(idx25, idx1025)
+  s3 <- if (length(idx25)) sh[idx25[1]] else NA_character_
+
+  rd <- function(s){
+    if (is.na(s)) return(NULL)
+    suppressWarnings(readxl::read_excel(path, sheet = s))
+  }
+
+  list(`5–10 s` = rd(s1),
+       `10–25 s` = rd(s2),
+       `≥25 s`   = rd(s3))
+}
+
+## ====== Compute mean ± 95% CI for a single group (*100; when n<=1, CI collapses to the mean band)======
+summarize_group_df <- function(df){
+  if (is.null(df) || ncol(df) < 2) return(NULL)
+  tcol <- which(grepl("time", names(df), ignore.case = TRUE))[1]
+  if (is.na(tcol)) tcol <- 1
+  time <- suppressWarnings(as.numeric(unlist(df[[tcol]])))
+  mat  <- suppressWarnings(data.matrix(df[ , setdiff(seq_along(df), tcol), drop = FALSE])) * 100
+
+  row_mean <- rowMeans(mat, na.rm = TRUE)
+  row_sd   <- apply(mat, 1, function(x) sd(x, na.rm = TRUE))
+  row_n    <- apply(mat, 1, function(x) sum(is.finite(x)))
+  row_se   <- ifelse(row_n > 1, row_sd / sqrt(row_n), NA_real_)
+  tcrit    <- qt(0.975, df = pmax(row_n - 1, 1))
+  lower <- row_mean - tcrit * row_se
+  upper <- row_mean + tcrit * row_se
+  bad   <- !is.finite(lower) | !is.finite(upper)
+  lower[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+  upper[bad & row_n >= 1] <- row_mean[bad & row_n >= 1]
+
+  list(df = data.frame(time = time, mean = row_mean, lower = lower, upper = upper, n = row_n),
+       n_cells = ncol(mat))
+}
+
+## ====== Panel y-axis (determined by all conditions; fully cover 95% CI and include negatives)======
+y_params_merge_multi <- function(df_list, y_manual_one = NULL,
+                                 n_breaks_target = 5, pad_frac = 0.20,
+                                 min_neg = 5, tick_frac = 0.05, label_frac = 0.08, edge_margin_frac = 0.02){
+  if (!is.null(y_manual_one)){
+    lims <- y_manual_one$lims %||% NULL
+    brks <- y_manual_one$breaks %||% NULL
+    if (is.null(lims) && !is.null(brks)) lims <- range(brks, na.rm = TRUE)
+    if (is.null(lims)) stop("Manual y-axis requires at least lims")
+  } else {
+    vals <- unlist(lapply(df_list, function(d){
+      if (is.null(d)) return(NULL)
+      c(d$lower, d$upper, d$mean)
+    }))
+    vals <- vals[is.finite(vals)]
+    y0 <- min(vals); y1 <- max(vals)
+    span <- max(y1 - y0, 1e-6)
+    pad  <- max(2, pad_frac * span)
+    y0 <- y0 - pad; y1 <- y1 + pad
+    y0 <- min(y0, 0); y1 <- max(y1, 0)
+    if (y0 >= 0) y0 <- -min_neg else y0 <- min(y0, -min_neg)
+    brks <- pretty(c(y0, y1), n = n_breaks_target)
+    lims <- range(c(brks, y0, y1))
+    if (all(abs(brks - 0) > .Machine$double.eps^0.5)) { brks <- sort(c(brks, 0)); lims <- range(c(brks, y0, y1)) }
+  }
+  if (is.null(brks)) brks <- pretty(lims, n = n_breaks_target)
+
+  rng      <- diff(lims)
+  tick_len <- tick_frac  * rng
+  label_y  <- 0 - label_frac * rng
+  need_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+  if (lims[1] > need_min) {
+    lims[1] <- need_min
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+    if (is.null(y_manual_one)) brks <- pretty(lims, n = n_breaks_target)
+    if (all(abs(brks - 0) > .Machine$double.eps^0.5)) brks <- sort(c(brks, 0))
+  }
+  list(lims=lims, breaks=brks, tick_len=tick_len, label_y=label_y)
+}
+
+## ====== Safely parse labels (use plotmath for superscripts)======
+safe_parse_label <- function(x) {
+  if (grepl("\\^|\\{|\\}", x)) {
+    out <- tryCatch(parse(text = x), error = function(e) NULL)
+    if (!is.null(out)) return(out)
+  }
+  x
+}
+
+## ====== Draw a merged panel: overlay multiple conditions on one plot (pass TRUE only when legend is shown) ======
+make_merged_panel <- function(sums_list, labels_vec, colors_vec, panel_title,
+                              show_bottom_x = FALSE, y_manual_all = NULL,
+                              show_legend = FALSE, legend_order = NULL) {
+  legend_inset <- c(0.01, 0.01)  # Top-right inset (stay within bounds)
+
+  # Assemble data for each condition
+  dflist <- lapply(seq_along(sums_list), function(i) {
+    si <- sums_list[[i]]
+    if (is.null(si)) return(NULL)
+    transform(si$df, condition = labels_vec[i])
+  })
+  dflist <- Filter(Negate(is.null), dflist)
+  if (!length(dflist)) {
+    return(ggplot() +
+             annotate("text", x = 30, y = 0, label = paste("No data in", panel_title), size = 4) +
+             coord_cartesian(xlim = c(0,60), ylim = c(-10,40), expand = FALSE) + theme_void())
+  }
+  dd <- do.call(rbind, dflist)
+  order_levels <- if (is.null(legend_order)) labels_vec else legend_order
+  dd$condition <- factor(dd$condition, levels = order_levels)
+
+  # y-axis parameters (multi-condition)
+  yman <- if (is.null(y_manual_all)) NULL else y_manual_all[[panel_title]]
+  yp <- y_params_merge_multi(df_list = lapply(dflist, identity), y_manual_one = yman)
+
+  x_breaks <- seq(5, 60, by = 5); axis_lw <- 0.7; tick_lw <- 0.7
+  names(colors_vec) <- labels_vec
+  fill_vec <- setNames(scales::alpha(colors_vec, 0.25), labels_vec)
+  label_out <- lapply(labels_vec, safe_parse_label)
+
+  ggplot() +
+    annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf,
+             fill = "grey70", alpha = 0.5) +
+    # 95% CI ribbon
+  geom_ribbon(data = dd,
+              aes(x = time, ymin = lower, ymax = upper, fill = condition),
+              alpha = 0.25, show.legend = FALSE) +
+  # mean line
+  geom_line(data = dd,
+            aes(x = time, y = mean, color = condition),
+            linewidth = 1, show.legend = show_legend) +
+  # Invisible placeholder lines to ensure all conditions appear in the legend (even if this panel has no data)
+  geom_line(
+    data = data.frame(time = 0, mean = 0, condition = order_levels),
+    aes(x = time, y = mean, color = condition),
+    inherit.aes = FALSE, alpha = 0, show.legend = show_legend
+  ) +
+  scale_color_manual(
+    values = colors_named[order_levels],
+    breaks = order_levels,
+    labels = lapply(order_levels, safe_parse_label),
+    limits = order_levels,
+    drop   = FALSE
+  ) +
+  scale_fill_manual(
+    values = scales::alpha(colors_named[order_levels], 0.25),
+    limits = order_levels,
+    drop   = FALSE,
+    guide  = "none"
+  ) +
+    guides(color = guide_legend(
+      override.aes = list(linetype = 1, linewidth = 1.5),
+      keywidth = unit(18, "pt"), keyheight = unit(8, "pt")
+    )) +
+    scale_x_continuous(limits = c(0, 60),
+                       breaks = x_breaks,
+                       expand = expansion(mult = c(0, 0.02))) +
+    scale_y_continuous(limits = yp$lims,
+                       breaks = yp$breaks,
+                       expand = c(0, 0)) +
+    coord_cartesian(clip = "off") +
+    ggtitle(panel_title) +
+    theme_classic(base_size = 16) +
+    theme(
+      legend.title      = element_blank(),
+      legend.background = element_blank(),
+      legend.key        = element_blank(),
+      legend.position       = if (show_legend) c(1 - legend_inset[1], 1 - legend_inset[2]) else "none",
+      legend.justification  = c(1, 1),
+      axis.line.x    = element_blank(),
+      axis.ticks.x   = element_blank(),
+      axis.text.x    = element_blank(),
+      axis.line.y    = element_line(linewidth = axis_lw, colour = "black"),
+      axis.ticks.y   = element_line(linewidth = tick_lw, colour = "black"),
+      axis.text.y    = element_text(colour = "black"),
+      axis.title.y   = element_text(margin = margin(r = 10)),
+      plot.title     = element_text(size = 10, hjust = 0),
+      plot.margin    = unit(c(5, 5, if (show_bottom_x) 14 else 5, 5), "pt")
+    ) +
+    geom_hline(yintercept = 0, linewidth = axis_lw, colour = "black") +
+    geom_segment(
+      data = data.frame(x = x_breaks),
+      aes(x = x, xend = x, y = 0, yend = 0 - yp$tick_len),
+      inherit.aes = FALSE, linewidth = tick_lw, colour = "black"
+    ) +
+    geom_text(
+      data = data.frame(x = x_breaks, lab = x_breaks),
+      aes(x = x, y = yp$label_y, label = lab),
+      inherit.aes = FALSE, vjust = 1, size = 4, colour = "black"
+    ) +
+    labs(x = if (show_bottom_x) "Time (s)" else NULL,
+         y = expression(Delta*F/F~"(%)"))
+}
+
+## ====== Read three files and generate three panels (legend only in the first) ======
+  ga <- read_group_sheets(groups_A)
+  gb <- read_group_sheets(groups_B)
+  gc <- read_group_sheets(groups_C)
+  
+  sA_510  <- summarize_group_df(ga[["5–10 s"]]);   sA_1025 <- summarize_group_df(ga[["10–25 s"]]); sA_25p  <- summarize_group_df(ga[["≥25 s"]])
+  sB_510  <- summarize_group_df(gb[["5–10 s"]]);   sB_1025 <- summarize_group_df(gb[["10–25 s"]]); sB_25p  <- summarize_group_df(gb[["≥25 s"]])
+  sC_510  <- summarize_group_df(gc[["5–10 s"]]);   sC_1025 <- summarize_group_df(gc[["10–25 s"]]); sC_25p  <- summarize_group_df(gc[["≥25 s"]])
+  
+  labels_vec   <- c(label_A, label_B, label_C)
+  colors_vec   <- c(col_A,   col_B,   col_C)
+  colors_named <- setNames(colors_vec, labels_vec)
+  
+  # Desired legend order（PGE2，LCIS，L-798106）
+  legend_order <- c(label_A, label_B, label_C)
+  
+  p1 <- make_merged_panel(
+  sums_list   = list(sA_510,  sB_510,  sC_510),
+  labels_vec  = labels_vec,
+  colors_vec  = colors_vec,
+  panel_title = "5–10 s",
+  show_bottom_x = FALSE,
+  y_manual_all  = y_manual,
+  show_legend   = TRUE,
+  legend_order  = legend_order        # ★ Legend order：PGE2, LCIS, L-798106
+  )
+  
+  p2 <- make_merged_panel(
+    sums_list   = list(sA_1025, sB_1025, sC_1025),
+    labels_vec  = labels_vec,
+    colors_vec  = colors_vec,
+    panel_title = "10–25 s",
+    show_bottom_x = FALSE,
+    y_manual_all  = y_manual,
+    show_legend   = FALSE,
+    legend_order  = legend_order
+  )
+  
+  p3 <- make_merged_panel(
+    sums_list   = list(sA_25p,  sB_25p,  sC_25p),
+    labels_vec  = labels_vec,
+    colors_vec  = colors_vec,
+    panel_title = "≥25 s",
+    show_bottom_x = TRUE,
+    y_manual_all  = y_manual,
+    show_legend   = FALSE,
+    legend_order  = legend_order
+  )
+
+
+## ====== Combine into one figure and save (do not collect external legends) ======
+# Parse thr/k (for filename; take from A)
+  get_thr_k <- function(onset){
+    bn <- basename(onset)
+    thr <- str_match(bn, "thr([0-9p\\.]+)")[,2] %||% "auto"
+    k   <- str_match(bn, "k(\\d+)")[,2]        %||% "k?"
+    paste0(thr, "_k", gsub("\\D","", k))
+  }
+  tkA <- get_thr_k(onset_A)
+  
+  p_stack <- patchwork::wrap_plots(p1, p2, p3, ncol = 1) +
+             patchwork::plot_layout(heights = c(1,1,1))
+  
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+  png_file <- file.path(out_dir, sprintf(
+    "MERGED_three_panels_%s_vs_%s_vs_%s_%s.png",
+    gsub("[^A-Za-z0-9]+","", label_A),
+    gsub("[^A-Za-z0-9]+","", label_B),
+    gsub("[^A-Za-z0-9]+","", label_C),
+    tkA
+  ))
+  ggsave(png_file, plot = p_stack, width = 7, height = 9, dpi = 300, bg = "white")
+  message("Saved: ", png_file)
+```
+
+#### 1 grouped + 2 averaged (PGE2, LCIS, L-798106)
+Data cleaning
+```{r}
+# Load required libraries
+library(ggplot2)
+library(patchwork)
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# ========= Config: paths / labels / colors =========
+# PGE2 data (grouped)
+data_A <- read_excel("G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/All the responsve neurons 4.xlsx")
+onset_A <- read_excel("G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx")
+label_A <- "PGE2"
+col_A <- "#F28E2B"
+
+# LCIS data (mean)
+# data_B <- read_excel("E:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/LCIS 2.xlsx")
+data_B <- read_excel("G:/NTU_INTERN/Zhang Na/20251003 Calcium imaging_LCIS/ALL - Delta F divide F 3_chudi.xlsx")
+label_B <- "LCIS"
+col_B <- "#000000"
+
+# L-798106 data (mean)
+data_C <- read_excel("G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/L-798106/L-798106 2.xlsx")
+label_C <- "L-798106"
+col_C <- "#4AC818"
+
+# ========= Read and process data =========
+# Read PGE2 grouping info
+cells_510 <- onset_A %>% 
+  filter(Responsive == "Yes", 5 <= Onset_Time_s, Onset_Time_s < 10)
+
+cells_1025 <- onset_A %>% 
+  filter(Responsive == "Yes", 10 <= Onset_Time_s, Onset_Time_s < 25)
+
+cells_25p <- onset_A %>% 
+  filter(Responsive == "Yes", 25 <= Onset_Time_s)
+
+# Read data
+cells_510_data <- data_A %>% 
+  select(all_of(cells_510$Cell)) %>%
+  mutate(across(everything(), ~ . * 100))
+
+cells_1025_data <- data_A %>% 
+  select(all_of(cells_1025$Cell)) %>%
+  mutate(across(everything(), ~ . * 100))
+
+cells_25p_data <- data_A %>% 
+  select(all_of(cells_25p$Cell)) %>%
+  mutate(across(everything(), ~ . * 100))
+
+cells_b <- data_B[,-1]*100
+cells_c <- data_C[,-1]*100
+
+# Extract time column
+time_a <- data_A[,1]
+time_b <- data_B[,1]
+data_C <- data_C %>% rename(Time = 1)
+time_a_vec <- as.numeric(time_a[[1]])
+time_b_vec <- as.numeric(time_b[[1]])
+time_c_vec <- data_C$Time
+time_c_vec[length(time_c_vec)] <- 60
+
+# ========= Data-processing function: compute mean and 95% CI =========
+library(Hmisc)   # Provides smean.cl.boot; alternatively use dplyr + ggplot2::mean_cl_boot
+
+calc_mean_ci <- function(df, time_vec, group_name) {
+  df %>% 
+    mutate(Time = time_vec) %>%               # attach time first
+    pivot_longer(cols = -Time, names_to = "Cell", values_to = "Value") %>%
+    group_by(Time) %>%
+    summarise(
+      Group = group_name,
+      Mean  = mean(Value, na.rm = TRUE),
+      Lower = smean.cl.boot(Value, na.rm = TRUE)["Lower"],
+      Upper = smean.cl.boot(Value, na.rm = TRUE)["Upper"],
+      .groups = "drop"
+    )
+}
+
+# Compute separately for the 5 datasets
+ci_510  <- calc_mean_ci(cells_510_data,  time_a_vec, "PGE2 (5–10 s)")
+ci_1025 <- calc_mean_ci(cells_1025_data, time_a_vec, "PGE2 (10–25 s)")
+ci_25p  <- calc_mean_ci(cells_25p_data,  time_a_vec, "PGE2 (≥25 s)")
+ci_b    <- calc_mean_ci(cells_b,         time_b_vec, label_B)
+ci_c    <- calc_mean_ci(cells_c,         time_c_vec, label_C)
+
+# Combine into one master table
+all_ci <- bind_rows(ci_510, ci_1025, ci_25p, ci_b, ci_c)
+
+# ==== Unify plot size and font sizes (match document style) ====
+# Tick/title font sizes (pt)
+x_tick_pt <- 18      # x-axis tick font size (pt)
+y_tick_pt <- 22      # y-axis tick font size (pt)
+title_pt  <- 20      # panel title font size (pt)
+axis_title_pt <- 20  # axis title font size (pt)
+legend_pt <- 16      # legend font size (pt)
+
+# Convert pt to the 'mm' size needed by geom_text (ggplot text size is in mm)
+pt2mm <- function(pt) pt / 2.8453
+
+# Line width and tick styling (consistent with the document)
+axis_lw <- 0.8
+tick_lw <- 0.8
+x_breaks <- seq(5, 60, by = 5)
+```
+
+Plot settings parameters
+```{r}
+# Manual y-axis settings (optional): keyed by title. Example is commented out.
+y_manual <- list(
+  "5–10 s"  = list(lims = c(-20, 80), breaks = seq(-20, 80, 20)),
+  "10–25 s" = list(lims = c(-25, 125), breaks = seq(-25, 125, 25)),
+  "≥25 s"   = list(lims = c(-20, 120), breaks = seq(-20, 120, 20))
+)
+
+# --- helpers: place before plotting code; run once ---
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+y_params_from_df <- function(df,
+                             n_breaks_target = 5,
+                             include_zero     = TRUE,
+                             pad_frac         = 0.10,
+                             min_neg          = 5,
+                             tick_frac        = 0.05,
+                             label_frac       = 0.08,
+                             edge_margin_frac = 0.02) {
+  vals <- c(df$lower, df$upper, df$mean)
+  vals <- vals[is.finite(vals)]
+  if (!length(vals)) {
+    lims <- c(-10, 40)
+    brks <- pretty(lims, n = n_breaks_target)
+    rng  <- diff(lims)
+    return(list(lims = lims,
+                breaks = brks,
+                label_y = 0 - label_frac * rng,
+                tick_len = tick_frac * rng))
+  }
+
+  # Initial range: data min/max + padding
+  y0 <- min(vals); y1 <- max(vals)
+  span <- max(y1 - y0, 1e-6)
+  pad  <- max(2, pad_frac * span)
+  y0 <- y0 - pad
+  y1 <- y1 + pad
+
+  # Force include 0 and ensure visible negatives
+  if (include_zero) { y0 <- min(y0, 0); y1 <- max(y1, 0) }
+  if (y0 >= 0) y0 <- -min_neg else y0 <- min(y0, -min_neg)
+
+  # Pretty ticks but do not shrink the range
+  brks <- pretty(c(y0, y1), n = n_breaks_target)
+  lims <- range(c(brks, y0, y1))
+  if (include_zero && all(abs(brks - 0) > .Machine$double.eps^0.5)) {
+    brks <- sort(c(brks, 0))
+    lims <- range(c(brks, y0, y1))
+  }
+
+  # Custom x-axis (relative to y=0) must fall within the plot: if needed, expand range downward only
+  rng      <- diff(lims)
+  tick_len <- tick_frac  * rng
+  label_y  <- 0 - label_frac * rng
+  needed_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+  if (lims[1] > needed_min) {
+    lims[1] <- needed_min
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+    brks     <- pretty(lims, n = n_breaks_target)
+    if (include_zero && all(abs(brks - 0) > .Machine$double.eps^0.5))
+      brks <- sort(c(brks, 0))
+  }
+
+  list(lims = lims, breaks = brks, label_y = label_y, tick_len = tick_len)
+}
+
+get_y_params <- function(df, title, y_manual = NULL, n_breaks_target = 5,
+                         tick_frac = 0.05, label_frac = 0.08, edge_margin_frac = 0.02) {
+  # Manual config provided → use it
+  if (!is.null(y_manual) && title %in% names(y_manual)) {
+    man  <- y_manual[[title]]
+    lims <- man$lims %||% NULL
+    brks <- man$breaks %||% NULL
+
+    if (is.null(lims) && !is.null(brks)) lims <- range(brks, na.rm = TRUE)
+    if (is.null(lims)) {
+      return(y_params_from_df(df, n_breaks_target = n_breaks_target, include_zero = TRUE,
+                              pad_frac = 0.10, min_neg = 5,
+                              tick_frac = tick_frac, label_frac = label_frac,
+                              edge_margin_frac = edge_margin_frac))
+    }
+    if (length(lims) != 2 || !is.finite(diff(lims)) || diff(lims) <= 0)
+      stop(sprintf("Invalid manual y-axis lims setting：%s", paste(lims, collapse = ",")))
+
+    # Room for custom x-axis elements (relative to y=0)
+    rng      <- diff(lims)
+    tick_len <- tick_frac  * rng
+    label_y  <- 0 - label_frac * rng
+    needed_min <- min(0 - tick_len, label_y) - edge_margin_frac * rng
+    if (lims[1] > needed_min) {
+      lims[1] <- needed_min
+      rng      <- diff(lims)
+      tick_len <- tick_frac  * rng
+      label_y  <- 0 - label_frac * rng
+    }
+
+    if (is.null(brks)) brks <- pretty(lims, n = n_breaks_target)
+    if (lims[1] <= 0 && lims[2] >= 0 && all(abs(brks - 0) > .Machine$double.eps^0.5))
+      brks <- sort(c(brks, 0))
+
+    return(list(lims = lims, breaks = brks, label_y = label_y, tick_len = tick_len))
+  }
+
+  # No manual config -> automatic
+  y_params_from_df(df, n_breaks_target = n_breaks_target, include_zero = TRUE,
+                   pad_frac = 0.10, min_neg = 5,
+                   tick_frac = tick_frac, label_frac = label_frac,
+                   edge_margin_frac = edge_margin_frac)
+}
+
+# If you haven't created y_manual yet, define an empty list here to avoid 'object not found'
+if (!exists("y_manual")) y_manual <- list()
+
+```
+
+PGE2 (5–10 s) + LCIS + L-798106（with legend, top-right; title is time only）
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# —— Assemble data and merge PGE2 into a unified legend name "PGE2" ——
+dd_510 <- dplyr::bind_rows(
+  ci_510 %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_b   %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_c   %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper)
+) %>%
+  mutate(condition = ifelse(grepl("^PGE2", condition), "PGE2", condition),
+         condition = factor(condition, levels = c("PGE2", label_B, label_C)))
+
+# Color mapping (legend keys: "PGE2", label_B, label_C)
+colors_510 <- setNames(c(col_A, col_B, col_C), c("PGE2", label_B, label_C))
+
+# —— Unify x-axis: every 5 s; hide default x-axis (use custom x-axis at y=0) ——
+x_breaks <- seq(5, 60, by = 5)
+axis_lw  <- 0.7
+tick_lw  <- 0.7
+
+# —— Get y-axis parameters (can be overridden by y_manual) ——
+yp_510 <- get_y_params(dd_510, title = "5–10 s", y_manual = y_manual, n_breaks_target = 5)
+rng_510 <- diff(yp_510$lims)
+
+p_510 <- ggplot(dd_510, aes(x = time)) +
+  annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf, fill = "grey70", alpha = 0.5) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = condition), alpha = 0.35, show.legend = FALSE) +
+  geom_line(aes(y = mean, color = condition), linewidth = 1.2, show.legend = TRUE) +
+  ggtitle("5–10 s") +
+  scale_color_manual(values = colors_510, name = NULL) +
+  scale_fill_manual(values = scales::alpha(colors_510, 0.25), guide = "none") +
+  scale_x_continuous(limits = c(0, 60), breaks = x_breaks, expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(limits = yp_510$lims, breaks = yp_510$breaks, expand = c(0, 0)) +
+  coord_cartesian(clip = "off") +
+  theme_classic(base_size = y_tick_pt) +   # ← use unified font size
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(size = title_pt, hjust = 0),
+    legend.position      = c(0.98, 0.98),
+    legend.justification = c(1, 1),
+    legend.background    = element_rect(fill = alpha("white", 0.6), colour = NA),
+    legend.key           = element_blank(),
+    legend.text          = element_text(size = legend_pt),
+
+    axis.line.x   = element_blank(),
+    axis.ticks.x  = element_blank(),
+    axis.text.x   = element_blank(),
+    axis.title.x  = element_blank(),
+
+    axis.line.y   = element_line(linewidth = axis_lw, colour = "black"),
+    axis.ticks.y  = element_line(linewidth = tick_lw, colour = "black"),
+    axis.title.y  = element_text(margin = margin(r = 10), size = axis_title_pt)
+  ) +
+  geom_hline(yintercept = 0, linewidth = axis_lw, colour = "black") +
+  geom_segment(
+    data = data.frame(x = x_breaks),
+    aes(x = x, xend = x, y = 0, yend = 0 - yp_510$tick_len),
+    inherit.aes = FALSE, linewidth = tick_lw, colour = "black"
+  ) +
+  geom_text(
+    data = data.frame(x = x_breaks, lab = x_breaks),
+    aes(x = x, y = yp_510$label_y, label = lab),
+    inherit.aes = FALSE, vjust = 1,
+    size = pt2mm(x_tick_pt),   # ← tick labels use unified font size via pt->mm
+    colour = "black"
+  ) +
+  labs(x = NULL, y = expression(Delta*F/F~"(%)"))
+
+p_510
+
+```
+
+
+PGE2 (10–25 s) + LCIS + L-798106（no legend）
+```{r}
+dd_1025 <- dplyr::bind_rows(
+  ci_1025 %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_b    %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_c    %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper)
+) %>%
+  mutate(condition = ifelse(grepl("^PGE2", condition), "PGE2", condition),
+         condition = factor(condition, levels = c("PGE2", label_B, label_C)))
+
+colors_1025 <- setNames(c(col_A, col_B, col_C), c("PGE2", label_B, label_C))
+x_breaks <- seq(5, 60, by = 5)
+axis_lw  <- 0.7
+tick_lw  <- 0.7
+
+yp_1025 <- get_y_params(dd_1025, title = "10–25 s", y_manual = y_manual, n_breaks_target = 5)
+
+p_1025 <- ggplot(dd_1025, aes(x = time)) +
+  annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf, fill = "grey70", alpha = 0.5) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = condition), alpha = 0.35, show.legend = FALSE) +
+  geom_line(aes(y = mean, color = condition), linewidth = 1.2, show.legend = FALSE) +
+  ggtitle("10–25 s") +
+  scale_color_manual(values = colors_1025, name = NULL) +
+  scale_fill_manual(values = scales::alpha(colors_1025, 0.25), guide = "none") +
+  scale_x_continuous(limits = c(0, 60), breaks = x_breaks, expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(limits = yp_1025$lims, breaks = yp_1025$breaks, expand = c(0, 0)) +
+  coord_cartesian(clip = "off") +
+  theme_classic(base_size = y_tick_pt) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(size = title_pt, hjust = 0),
+    legend.position   = "none",
+    axis.line.x   = element_blank(),
+    axis.ticks.x  = element_blank(),
+    axis.text.x   = element_blank(),
+    axis.title.x  = element_blank(),
+    axis.line.y   = element_line(linewidth = axis_lw, colour = "black"),
+    axis.ticks.y  = element_line(linewidth = tick_lw, colour = "black"),
+    axis.title.y  = element_text(margin = margin(r = 10), size = axis_title_pt)
+  ) +
+  geom_hline(yintercept = 0, linewidth = axis_lw, colour = "black") +
+  geom_segment(
+    data = data.frame(x = x_breaks),
+    aes(x = x, xend = x, y = 0, yend = 0 - yp_1025$tick_len),
+    inherit.aes = FALSE, linewidth = tick_lw, colour = "black"
+  ) +
+  geom_text(
+    data = data.frame(x = x_breaks, lab = x_breaks),
+    aes(x = x, y = yp_1025$label_y, label = lab),
+    inherit.aes = FALSE, vjust = 1,
+    size = pt2mm(x_tick_pt),
+    colour = "black"
+  ) +
+  labs(x = NULL, y = expression(Delta*F/F~"(%)"))
+
+
+p_1025
+
+```
+
+
+PGE2 (≥25 s) + LCIS + L-798106（no legend，with x-axis label）
+```{r}
+dd_25p <- dplyr::bind_rows(
+  ci_25p %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_b   %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper),
+  ci_c   %>% transmute(time = Time, condition = Group, mean = Mean, lower = Lower, upper = Upper)
+) %>%
+  mutate(condition = ifelse(grepl("^PGE2", condition), "PGE2", condition),
+         condition = factor(condition, levels = c("PGE2", label_B, label_C)))
+
+colors_25p <- setNames(c(col_A, col_B, col_C), c("PGE2", label_B, label_C))
+x_breaks <- seq(5, 60, by = 5)
+axis_lw  <- 0.7
+tick_lw  <- 0.7
+
+yp_25p <- get_y_params(dd_25p, title = "≥25 s", y_manual = y_manual, n_breaks_target = 5)
+
+p_25p <- ggplot(dd_25p, aes(x = time)) +
+  annotate("rect", xmin = 3, xmax = 5, ymin = 0, ymax = Inf, fill = "grey70", alpha = 0.5) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = condition), alpha = 0.35, show.legend = FALSE) +
+  geom_line(aes(y = mean, color = condition), linewidth = 1.2, show.legend = FALSE) +
+  ggtitle("≥25 s") +
+  scale_color_manual(values = colors_25p, name = NULL) +
+  scale_fill_manual(values = scales::alpha(colors_25p, 0.25), guide = "none") +
+  scale_x_continuous(limits = c(0, 60), breaks = x_breaks, expand = expansion(mult = c(0, 0.02))) +
+  scale_y_continuous(limits = yp_25p$lims, breaks = yp_25p$breaks, expand = c(0, 0)) +
+  coord_cartesian(clip = "off") +
+  theme_classic(base_size = y_tick_pt) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(size = title_pt, hjust = 0),
+    legend.position   = "none",
+    axis.line.x   = element_blank(),
+    axis.ticks.x  = element_blank(),
+    axis.text.x   = element_blank(),
+    axis.title.x  = element_text(margin = margin(t = 10), size = axis_title_pt),
+    axis.line.y   = element_line(linewidth = axis_lw, colour = "black"),
+    axis.ticks.y  = element_line(linewidth = tick_lw, colour = "black"),
+    axis.title.y  = element_text(margin = margin(r = 10), size = axis_title_pt)
+  ) +
+  geom_hline(yintercept = 0, linewidth = axis_lw, colour = "black") +
+  geom_segment(
+    data = data.frame(x = x_breaks),
+    aes(x = x, xend = x, y = 0, yend = 0 - yp_25p$tick_len),
+    inherit.aes = FALSE, linewidth = tick_lw, colour = "black"
+  ) +
+  geom_text(
+    data = data.frame(x = x_breaks, lab = x_breaks),
+    aes(x = x, y = yp_25p$label_y, label = lab),
+    inherit.aes = FALSE, vjust = 1,
+    size = pt2mm(x_tick_pt),
+    colour = "black"
+  ) +
+  labs(x = "Time (s)", y = expression(Delta*F/F~"(%)"))
+
+
+p_25p
+
+```
+
+
+Combine three plots
+```{r}
+# Requires patchwork or cowplot (choose one)
+# install.packages("patchwork")
+library(patchwork)
+
+p_all <- p_510 / p_1025 / p_25p
+p_all
+
+# Save
+# out_dir <- "E:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/merged_panels"
+out_dir <- "G:/NTU_INTERN/Zhang Na/PLOT/20251004/merged_panels"
+outfile <- file.path(out_dir, "MERGED_plate_mean_95CI_three_panels.png")
+ggsave(outfile, plot = p_all, width = 7, height = 9, dpi = 300, bg = "white")
+message("Saved: ", outfile)
+
+```
+
+
+
+# end
+
+
