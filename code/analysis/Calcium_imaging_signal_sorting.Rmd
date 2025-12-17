@@ -22,7 +22,7 @@ library(viridisLite)
 library(readxl); library(writexl); library(ComplexHeatmap); library(circlize)
 
 ## ===== Paths =====
-file_path <- "E:/NTU_INTERN/Zhang Na/20251003 Calcium imaging_LCIS/ALL - Delta F divide F 3_chudi.xlsx"
+file_path <- "ALL - Delta F divide F 3_chudi.xlsx"
 
 ## ===== Parameters =====
 override_thresh <- 0.15          # Compare threshold directly on ΔF/F or ΔF/F(%)
@@ -587,15 +587,15 @@ pt2mm <- function(pt) pt / 2.8453   # for geom_text/annotate("text")
 
 ## ====== Parameters: two files & labels/colors & output directory ======
 # Condition A（PGE2）
-groups_A <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
-onset_A  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+groups_A <- "20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_A  <- "20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
 label_A  <- "Wide type"            # legend display name
 # col_A    <- "#F28E2B"       # orange
 col_A <- "#000000"
 
 # Condition B（Ptger3^{flox/flox}） - 4
-groups_B <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
-onset_B  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+groups_B <- "20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_B  <- "20250829 Calcium imaging all the responsve neurons_2/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
 label_B  <- 'Ptger3^{"flox/flox"}'   # plotmath
 # col_B    <- "#808080"                  # grey
 col_B <- "#F28E2B" 
@@ -849,25 +849,25 @@ library(readxl); library(ggplot2); library(patchwork); library(stringr); library
 
 ## ====== Parameters: three files & labels/colors & output directory ======
 # Condition A
-groups_A <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
-onset_A  <- "G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
+groups_A <- "20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_A  <- "20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx"
 label_A  <- "PGE2"
 col_A    <- "#F28E2B"
 
 # Condition B
-groups_B <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
-onset_B  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+groups_B <- "20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_B  <- "20250829 3merge_line/LCIS/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
 label_B  <- "LCIS"
 col_B    <- "#000000"
 
 # Condition C
-groups_C <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
-onset_C  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+groups_C <- "20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
+onset_C  <- "20250829 3merge_line/L-798106/ALL_OnsetGroups_manual_5_10_25_sorted_thr0p15_k5.xlsx"
 label_C  <- "L-798106"
 col_C    <- "#4AC818"
 
 # Output directory
-out_dir  <- "G:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/merged_panels_sorted"
+out_dir  <- "20250829 3merge_line/merged_panels_sorted"
 
 ## === Optional: Manual y-axis settings per panel (set to NULL if not needed)
 # y_manual <- NULL
@@ -1177,14 +1177,14 @@ library(tidyr)
 
 # ========= Config: paths / labels / colors =========
 # PGE2 data (grouped)
-data_A <- read_excel("G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/All the responsve neurons 4.xlsx")
-onset_A <- read_excel("G:/NTU_INTERN/Zhang Na/20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx")
+data_A <- read_excel("20250829 Calcium imaging all the responsve neurons/All the responsve neurons 4.xlsx")
+onset_A <- read_excel("20250829 Calcium imaging all the responsve neurons/thr0p15_k5/ALL_OnsetTimes_skip5_thr0p15_k5.xlsx")
 label_A <- "PGE2"
 col_A <- "#F28E2B"
 
 # LCIS data (mean)
-# data_B <- read_excel("E:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/LCIS/LCIS 2.xlsx")
-data_B <- read_excel("G:/NTU_INTERN/Zhang Na/20251003 Calcium imaging_LCIS/ALL - Delta F divide F 3_chudi.xlsx")
+# data_B <- read_excel("20250829 3merge_line/LCIS/LCIS 2.xlsx")
+data_B <- read_excel("20251003 Calcium imaging_LCIS/ALL - Delta F divide F 3_chudi.xlsx")
 label_B <- "LCIS"
 col_B <- "#000000"
 
@@ -1599,8 +1599,7 @@ p_all <- p_510 / p_1025 / p_25p
 p_all
 
 # Save
-# out_dir <- "E:/NTU_INTERN/Zhang Na/PLOT/20250829 3merge_line/merged_panels"
-out_dir <- "G:/NTU_INTERN/Zhang Na/PLOT/20251004/merged_panels"
+out_dir <- "20251004/merged_panels"
 outfile <- file.path(out_dir, "MERGED_plate_mean_95CI_three_panels.png")
 ggsave(outfile, plot = p_all, width = 7, height = 9, dpi = 300, bg = "white")
 message("Saved: ", outfile)
