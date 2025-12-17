@@ -7,7 +7,7 @@ library(ggplot2)
 library(tidyverse)
 
   # Load the data
-  data <- read_excel("C:/Users/zhangn/Desktop/Research update/Publication data/Fig 2/20250606 In vitro calcium imaging with inhibitors/PGE2/Batch 1 and 2/DeltaFdivideF2_batch2 combined with all batch 1.xlsx", sheet = "Sheet1")
+  data <- read_excel("DeltaFdivideF2_batch2 combined with all batch 1.xlsx", sheet = "Sheet1")
   
   # Convert columns 2 to 81 into matrix (cell traces)
   df_matrix <- as.matrix(data[, 1:80])
