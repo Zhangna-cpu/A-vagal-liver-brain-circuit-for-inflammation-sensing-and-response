@@ -19,15 +19,15 @@ The code is organized under `code/analysis/` (analysis workflows) and `code/figu
 
 ### Extended Data Fig. 10b–c; Extended Data Fig. 12o-q, s-u
 Generated with:
-- `code/figures/SingleCell_CalciumHeatmap_DeltaFoverF_ResponseRanking.R`
+- `code/visulization/Calcium imaging Heatmap_DeltaFoverF_ResponseRanking.R`
 
 ### Fig. 1j–k; Extended Data Fig. 2; Extended Data Fig. 8; Extended Data Fig. 12f, i, l; Extended Data Fig. 13o-z
 Generated with:
-- `code/analysis/NG_Liver_scRNAseq_UPB_Labeling_Clustering_DEG_GSEA_Power_CellChat.R`
+- `code/analysis/NG_Liver_scRNAseq_DEG_GSEA_Power_CellChat.R`
 
 ### Fig. 1n
 Generated with:
-- `code/figures/Enrichr analysis_revisualization.Rmd`
+- `code/visulization/Enrichr analysis_visualization.Rmd`
 
 ### Fig. 2d–g; Fig. 5d–g; Extended Data Fig. 10a
 Generated with:
