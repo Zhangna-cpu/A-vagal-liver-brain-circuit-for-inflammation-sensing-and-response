@@ -40,15 +40,6 @@ x <- VlnPlot(t1, features = c(
 
 ggsave("RNA2.jpeg", plot = x, width = 16, height =35, dpi = 300, units = "in")
 
-x <- FeaturePlot_scCustom(t1, aspect_ratio = 1, features = c(
-  "Ptger3", "Ptger4", "Gpr65", "Glp1r", "Sst", "Tac1", "Trpv1", "Trpa1", "Oxtr", "Cysltr2",
-  "Ahr", "Tlr4", "Il1r1", "Tnfrsf1a", "Tnfrsf1b", "Il6r", "Il6st", "Ghsr", "Th", "Mrgpre",
-  "Mrgprf", "Slc2a4", "Insr", "Ackr1", "C1ql2", "Chrnb4", "Igf1r", "Lepr", "Cckbr", "Grp",
-  "Phox2b", "Slc17a6", "Prph", "Nefh", "UPB", "tdTomato"
-))
-
-ggsave("SCT_feature2.jpeg", plot = x, width = 16, height =35, dpi = 300, units = "in")
-
 ##############################################
 #
 # DEGs 
