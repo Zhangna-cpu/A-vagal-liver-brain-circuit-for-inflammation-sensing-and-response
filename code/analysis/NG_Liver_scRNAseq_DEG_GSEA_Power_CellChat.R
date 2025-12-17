@@ -32,10 +32,9 @@ library(CellChat)
 readRDS("t1.RDS")
 
 x <- VlnPlot(t1, features = c(
-  "Ptger3", "Ptger4", "Gpr65", "Glp1r", "Sst", "Tac1", "Trpv1", "Trpa1", "Oxtr", "Cysltr2",
-  "Ahr", "Tlr4", "Il1r1", "Tnfrsf1a", "Tnfrsf1b", "Il6r", "Il6st", "Ghsr", "Th", "Mrgpre",
-  "Mrgprf", "Slc2a4", "Insr", "Ackr1", "C1ql2", "Chrnb4", "Igf1r", "Lepr", "Cckbr", "Grp", 
-  "Phox2b", "Slc17a6", "Prph", "Nefh", "UPB", "tdTomato"
+  "UPB", "Ptger3", "Ptger4", "Gpr65", "Glp1r", "Sst", "Tac1", "Trpv1", "Oxtr", "Cysltr2",
+  "Ahr", "Tlr4", "Tnfrsf1a", "Il1r1", "Ccr2", "Ccr1", "Ccr5", "Ccr3", "Cxcr2", "Cxcr3",
+  "Csf3r", "Csf2ra", "Csf2rb", "Il22ra1", "Il31ra", "Il6ra"
 ))
 
 ggsave("RNA2.jpeg", plot = x, width = 16, height =35, dpi = 300, units = "in")
