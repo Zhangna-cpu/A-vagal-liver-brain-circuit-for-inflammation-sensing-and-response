@@ -17,11 +17,11 @@ The code is organized under `code/analysis/` (analysis workflows) and `code/figu
 
 ## Figure-to-code mapping (Manuscript)
 
-### Extended Data Fig. 10b–c
+### Extended Data Fig. 10b–c; Extended Data Fig. 12o-q, s-u
 Generated with:
 - `code/figures/SingleCell_CalciumHeatmap_DeltaFoverF_ResponseRanking.R`
 
-### Fig. 1j–k; Extended Data Fig. 2; Extended Data Fig. 8
+### Fig. 1j–k; Extended Data Fig. 2; Extended Data Fig. 8; Extended Data Fig. 12f, i, l; Extended Data Fig. 13o-z
 Generated with:
 - `code/analysis/NG_Liver_scRNAseq_UPB_Labeling_Clustering_DEG_GSEA_Power_CellChat.R`
 
@@ -29,6 +29,6 @@ Generated with:
 Generated with:
 - `code/figures/Enrichr analysis_revisualization.Rmd`
 
-### Fig. 2d–g; Fig. 5d–g
+### Fig. 2d–g; Fig. 5d–g; Extended Data Fig. 10a
 Generated with:
 - `code/analysis/Calcium_imaging_signal_sorting.Rmd`
