@@ -26,7 +26,7 @@ library(CellChat)
 
 ##############################################
 #
-# Violin and umap plots for gene check
+# Violin plots for gene check
 #
 ##############################################
 readRDS("t1.RDS")
