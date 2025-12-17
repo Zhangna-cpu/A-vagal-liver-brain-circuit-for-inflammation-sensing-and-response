@@ -1,0 +1,116 @@
+---
+title: "PLOT"
+author: "Chudi_Zeng"
+date: "2025-07-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(viridis)  
+library(dplyr)
+library(tidyverse)
+library(ggrepel)
+library(ggforce)
+library(tidyr)
+library(ggalluvial)
+library(patchwork)
+```
+
+## Lolipop plot
+data input
+```{r}
+library(readxl)
+HMDB <- read_excel("HMDB.xlsx")
+View(HMDB)
+```
+
+select top 20 metabolites
+```{r}
+top20 <- HMDB %>%
+  arrange(desc(`Combined Score`)) %>%  
+  slice_head(n = 20) %>%             
+  mutate(Term = factor(Term, levels = rev(unique(Term))))
+
+top20 <- top20 %>%
+  mutate(order = row_number())
+
+# mark C19H28O3
+top20[6, 10] <- top20[6, 1]
+top20[9, 10] <- top20[9, 1]
+
+top20_genes <- top20 %>% separate_rows(Genes, sep = ";")
+```
+
+Top_20_Metabolites_Combined_Score
+```{r}
+top20 <- top20 |>
+  dplyr::mutate(
+    Term_Name_fac = factor(
+      Term_Name,
+      levels = Term_Name[order(order, decreasing = TRUE)]
+    )
+  )
+
+p3 <- ggplot(top20, aes(x = `Combined Score`, y = Term_Name_fac)) +
+  geom_segment(aes(x = 0, xend = `Combined Score`, y = Term_Name_fac, yend = Term_Name_fac),
+               size = 2.5, color = "#C9CACA", linetype = "solid") + 
+  geom_point(aes(fill = HMDB_ID, size = -log10(`Adjusted P-value`)), shape = 21) +
+  geom_point(aes(fill = HMDB_ID), shape = 21, size = 8) +
+  xlim(0, 150) + 
+  theme_classic() + 
+  theme(
+    axis.text.x = element_text(size = 20),
+    axis.text.y = element_text(size = 20),
+    axis.title.x = element_text(size = 24),
+    axis.title.y = element_text(size = 24),
+    legend.position = "none"
+  ) +
+  labs(y = "Metabolite", x = "Combined Score")
+
+# mark the number of rows of PGE2
+pge2_df <- dplyr::filter(top20, .is_pge2)
+
+p3 <- p3 +
+  geom_text(
+    data = pge2_df,
+    aes(
+      x = `Combined Score`,
+      y = Term_Name_fac,
+      label = "Ptger3"
+    ),
+    vjust = 1.6,
+    fontface = "bold",
+    color = "#000000",
+    size = 10,
+    position = position_nudge(y = -0.25),
+    inherit.aes = FALSE 
+  )
+
+p3
+ggsave("Top_20_Metabolites_Combined_Score_lolipop_1030_long.png",
+       p3, width = 48, height = 24, units = "cm")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
