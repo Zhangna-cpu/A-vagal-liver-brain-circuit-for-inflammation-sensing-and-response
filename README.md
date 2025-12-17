@@ -4,8 +4,6 @@ This repository contains R scripts/R Markdown notebooks used to generate figures
 
 The code is organized under `code/analysis/` (analysis workflows) and `code/figures/` (figure rendering / visualization).
 
-> **Note:** Many scripts expect local paths (e.g., `setwd(...)` and absolute file paths). Please update paths before running.
-
 ---
 
 ## Repository structure
