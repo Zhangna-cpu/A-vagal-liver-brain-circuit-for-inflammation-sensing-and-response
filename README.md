@@ -2,7 +2,7 @@
 
 This repository contains R scripts/R Markdown notebooks used to generate figures for the manuscript **“A vagal liver–brain circuit for inflammation sensing and response”**.
 
-The code is organized under `code/analysis/` (analysis workflows) and `code/figures/` (figure rendering / visualization).
+The code is organized under `code/analysis/` (analysis workflows) and `code/visualization/` (figure rendering / visualization).
 
 ---
 
@@ -10,7 +10,7 @@ The code is organized under `code/analysis/` (analysis workflows) and `code/figu
 
 - `code/analysis/`  
   Analysis pipelines
-- `code/figures/`  
+- `code/visualization/`  
   Figure-specific plotting scripts
 
 ---
