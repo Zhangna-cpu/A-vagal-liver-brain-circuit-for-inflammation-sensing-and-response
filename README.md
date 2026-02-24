@@ -39,7 +39,22 @@ In R (from the repo root):
 install.packages("renv", repos = "https://cloud.r-project.org")
 renv::restore()
 ```
-> The expected run time for demo on a "normal" desktop computer is around 10-15minutes.
+
+### 3) Demo inputs, scripts, and expected outputs
+#### (A) Calcium imaging demo
+- **Input demo data**: data/demo/calcium/All the responsve neurons 2.xlsx
+- **Script**: code/analysis/Calcium_imaging_signal_sorting.R
+- **What it does**: Processes calcium imaging ΔF/F traces, performs response typing/classification, and generates line plots summarizing response patterns.
+- **Expected outputs**: See expected_output/demo/calcium/ (all reference outputs for the demo are stored there).
+
+#### (B) Enrichr visualization demo
+- **Input demo data**: data/demo/enrichr/HMDB.xlsx
+- **Script**: code/visulization/Enrichr_analysis_visualization.R
+- **What it does**: Generates Enrichr-related visualization(s) (e.g., lollipop-style plots) based on the HMDB demo table.
+- **Expected outputs**: See expected_output/demo/enrichr/ (all reference outputs for the demo are stored there).
+
+#### Expected runtime
+> The expected run time for the demo on a “normal” desktop computer is around **10–15 minutes** (depending on package installation state and system performance).
 ---
 
 ## Repository structure
