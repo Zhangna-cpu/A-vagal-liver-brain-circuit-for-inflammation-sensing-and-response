@@ -94,8 +94,8 @@ Generated with:
 
 **Fig. 1n**  
 Generated with:
-- `code/visulization/Enrichr_analysis_visualization.Rmd`
+- `code/visulization/Enrichr_analysis_visualization.R`
 
 **Fig. 2d–g; Fig. 5d–g; Extended Data Fig. 10a**  
 Generated with:
-- `code/analysis/Calcium_imaging_signal_sorting.Rmd`
+- `code/analysis/Calcium_imaging_signal_sorting.R`
