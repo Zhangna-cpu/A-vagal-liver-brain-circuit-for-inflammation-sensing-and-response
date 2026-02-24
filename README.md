@@ -14,7 +14,7 @@ The repository is organized as research scripts (not an R package). For Nature-s
 ## System requirements
 
 ### Tested software / OS
-- **R**: 4.3.1
+- **R**: 4.3.1 / 4.5.1
 - **Platform tested**: x86_64-w64-mingw32/x64 (Windows 64-bit)
 
 > The full list of R package dependencies (with versions) is recorded in `renv.lock`.
