@@ -27,7 +27,7 @@ The repository is organized as research scripts (not an R package). For Nature-s
 
 ---
 
-## Installation
+## Installation / Demo
 
 ### 1) Download / clone this repository
 Use GitHub “Download ZIP” or `git clone`, then open an R session at the repository root.
@@ -39,6 +39,7 @@ In R (from the repo root):
 install.packages("renv", repos = "https://cloud.r-project.org")
 renv::restore()
 ```
+> The expected run time for demo on a "normal" desktop computer is around 10-15minutes.
 ---
 
 ## Repository structure
@@ -54,11 +55,11 @@ renv::restore()
 - `data/demo/`
   - Small demo input datasets
   - `calcium`
-    -  `All the responsve neurons 2.xlsx` 
   - `enrichr`
-    - `HMDB.xlsx`
 - `expected_output/demo/`
   - Reference outputs for the demo datasets
+  - `calcium`
+  - `enrichr`
 - `renv.lock`  
   - Full dependency list with pinned versions for reproducibility
 
