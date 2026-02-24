@@ -14,7 +14,7 @@ The repository is organized as research scripts (not an R package). For Nature-s
 ## System requirements
 
 ### Tested software / OS
-- **R**: 4.5.1 (2025-06-13 ucrt) — “Great Square Root”
+- **R**: 4.3.1
 - **Platform tested**: x86_64-w64-mingw32/x64 (Windows 64-bit)
 
 > The full list of R package dependencies (with versions) is recorded in `renv.lock`.
@@ -32,7 +32,7 @@ The repository is organized as research scripts (not an R package). For Nature-s
 ### 1) Download / clone this repository
 Use GitHub “Download ZIP” or `git clone`, then open an R session at the repository root.
 
-### 2) Restore the exact package versions (recommended)
+### 2) Restore the exact package versions
 In R (from the repo root):
 
 ```r
@@ -42,16 +42,16 @@ renv::restore()
 
 ### 3) Demo inputs, scripts, and expected outputs
 #### (A) Calcium imaging demo
-- **Input demo data**: data/demo/calcium/All the responsve neurons 2.xlsx
-- **Script**: code/analysis/Calcium_imaging_signal_sorting.R
+- **Input demo data**: `data/demo/calcium/All the responsve neurons 2.xlsx`
+- **Script**: `code/analysis/Calcium_imaging_signal_sorting.R`
 - **What it does**: Processes calcium imaging ΔF/F traces, performs response typing/classification, and generates line plots summarizing response patterns.
-- **Expected outputs**: See expected_output/demo/calcium/ (all reference outputs for the demo are stored there).
+- **Expected outputs**: See `expected_output/demo/calcium/`.
 
 #### (B) Enrichr visualization demo
-- **Input demo data**: data/demo/enrichr/HMDB.xlsx
-- **Script**: code/visulization/Enrichr_analysis_visualization.R
+- **Input demo data**: `data/demo/enrichr/HMDB.xlsx`
+- **Script**: `code/visulization/Enrichr_analysis_visualization.R`
 - **What it does**: Generates Enrichr-related visualization(s) (e.g., lollipop-style plots) based on the HMDB demo table.
-- **Expected outputs**: See expected_output/demo/enrichr/ (all reference outputs for the demo are stored there).
+- **Expected outputs**: See `expected_output/demo/enrichr/`.
 
 #### Expected runtime
 > The expected run time for the demo on a “normal” desktop computer is around **10–15 minutes** (depending on package installation state and system performance).
